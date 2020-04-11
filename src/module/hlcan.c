@@ -1,109 +1,797 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- * hl340.c - CAN driver interface for 
+ * Copyright 2007, Frank A Kingswood <frank@kingswood-consulting.co.uk>
+ * Copyright 2007, Werner Cornelius <werner@cornelius-consult.de>
+ * Copyright 2009, Boris Hajduk <boris@hajduk.org>
  *
- * This file is derived from linux/drivers/net/can/slcan.c
+ * ch341.c implements a serial port driver for the Winchiphead CH341.
  *
- *
- * slip.c Authors  : Laurence Culhane <loz@holmes.demon.co.uk>
- *                   Fred N. van Kempen <waltje@uwalt.nl.mugnet.org>
- * slcan.c Author  : Oliver Hartkopp <socketcan@hartkopp.net>
- * hl340.c Author  : Alexander Mohr <usbcan@mohr.io.net>
- *
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2 of the License, or (at your
- * option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, see http://www.gnu.org/licenses/gpl.html
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
- * DAMAGE.
- *
+ * The CH341 device can be used to implement an RS232 asynchronous
+ * serial port, an IEEE-1284 parallel printer port or a memory-like
+ * interface. In all cases the CH341 supports an I2C interface as well.
+ * This driver only supports the asynchronous serial interface.
  */
 
-#include <linux/module.h>
-#include <linux/moduleparam.h>
-
-#include <linux/uaccess.h>
-#include <linux/bitops.h>
-#include <linux/string.h>
-#include <linux/tty.h>
-#include <linux/errno.h>
-#include <linux/netdevice.h>
-#include <linux/skbuff.h>
-#include <linux/rtnetlink.h>
-#include <linux/if_arp.h>
-#include <linux/if_ether.h>
-#include <linux/sched.h>
-#include <linux/delay.h>
-#include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/workqueue.h>
+#include <linux/tty.h>
+#include <linux/module.h>
+#include <linux/slab.h>
+#include <linux/usb.h>
+#include <linux/usb/serial.h>
+#include <linux/serial.h>
+#include <asm/unaligned.h>
+
+#include <linux/netdevice.h>
 #include <linux/can.h>
 #include <linux/can/dev.h>
 #include <linux/can/skb.h>
+#include <linux/can/error.h>
 
-#include "hlcan.h"
+#define HLCAN_FRAME_PREFIX 	0xC0
+#define HLCAN_FLAG_RTR	 	0x10
+#define HLCAN_FLAG_ID_EXT 	0x20
+#define HLCAN_TYPE_MASK		0xF0
 
-MODULE_ALIAS_LDISC(N_HLCAN);
-MODULE_DESCRIPTION("hl340 CAN interface");
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Alexander Mohr <hlcan@mohr.io>");
+#define HLCAN_STD_DATA_FRAME 	0xC0
+#define HLCAN_EXT_DATA_FRAME 	0xE0
+#define HCLAN_STD_REMOTE_FRAME 	0xD0
+#define HCLAN_EXT_REMOTE_FRAME 	0xF0
 
-static int maxdev = 10;		/* MAX number of SLCAN channels;
-				   This can be overridden with
-				   insmod slcan.ko maxdev=nnn	*/
-module_param(maxdev, int, 0);
-MODULE_PARM_DESC(maxdev, "Maximum number of hlcan interfaces");
+#define HLCAN_PACKET_START 		0xAA
+#define HLCAN_PACKET_END		0x55
 
-/* maximum rx buffer len: 20 should be enough as config command is largest cmd*/
-#define SLC_MTU (128)
-#define DRV_NAME			"hlcan"
-#define SLF_INUSE		0		/* Channel in use            */
-#define SLF_ERROR		1		/* Parity, etc. error        */
-spinlock_t		global_lock;
+#define HLCAN_CFG_PACKAGE_TYPE	0x55
+#define HLCAN_CFG_PACKAGE_LEN	0x14
+#define HLCAN_CFG_CRC_IDX		0x02
 
-struct slcan {
+#define IO_CTL_MODE             0xF3
+
+typedef enum {
+	NONE,
+	RECEIVING,
+	COMPLETE,
+	MISSED_HEADER
+} FRAME_STATE;
+
+typedef enum {
+    HLCAN_SPEED_1000000 = 0x01,
+    HLCAN_SPEED_800000 = 0x02,
+    HLCAN_SPEED_500000 = 0x03,
+    HLCAN_SPEED_400000 = 0x04,
+    HLCAN_SPEED_250000 = 0x05,
+    HLCAN_SPEED_200000 = 0x06,
+    HLCAN_SPEED_125000 = 0x07,
+    HLCAN_SPEED_100000 = 0x08,
+    HLCAN_SPEED_50000 = 0x09,
+    HLCAN_SPEED_20000 = 0x0a,
+    HLCAN_SPEED_10000 = 0x0b,
+    HLCAN_SPEED_5000 = 0x0c,
+    HLCAN_SPEED_INVALID = 0xff,
+} HLCAN_SPEED;
+
+typedef enum {
+    HLCAN_MODE_NORMAL = 0x00,
+    HLCAN_MODE_LOOPBACK = 0x01,
+    HLCAN_MODE_SILENT = 0x02,
+    HLCAN_MODE_LOOPBACK_SILENT = 0x03,
+} HLCAN_MODE;
+
+typedef enum {
+    HLCAN_FRAME_STANDARD = 0x01,
+    HLCAN_FRAME_EXTENDED = 0x02,
+} HLCAN_FRAME_TYPE;
+
+#define DEFAULT_BAUD_RATE 9600
+#define DEFAULT_TIMEOUT   1000
+
+/* flags for IO-Bits */
+#define ch341_can_BIT_RTS (1 << 6)
+#define ch341_can_BIT_DTR (1 << 5)
+
+/******************************/
+/* interrupt pipe definitions */
+/******************************/
+/* always 4 interrupt bytes */
+/* first irq byte normally 0x08 */
+/* second irq byte base 0x7d + below */
+/* third irq byte base 0x94 + below */
+/* fourth irq byte normally 0xee */
+
+/* second interrupt byte */
+#define ch341_can_MULT_STAT 0x04 /* multiple status since last interrupt event */
+
+/* status returned in third interrupt answer byte, inverted in data
+   from irq */
+#define ch341_can_BIT_CTS 0x01
+#define ch341_can_BIT_DSR 0x02
+#define ch341_can_BIT_RI  0x04
+#define ch341_can_BIT_DCD 0x08
+#define ch341_can_BITS_MODEM_STAT 0x0f /* all bits */
+
+/* Break support - the information used to implement this was gleaned from
+ * the Net/FreeBSD uchcom.c driver by Takanori Watanabe.  Domo arigato.
+ */
+
+#define ch341_can_REQ_READ_VERSION 0x5F
+#define ch341_can_REQ_WRITE_REG    0x9A
+#define ch341_can_REQ_READ_REG     0x95
+#define ch341_can_REQ_SERIAL_INIT  0xA1
+#define ch341_can_REQ_MODEM_CTRL   0xA4
+
+#define ch341_can_REG_BREAK        0x05
+#define ch341_can_REG_LCR          0x18
+#define ch341_can_NBREAK_BITS      0x01
+
+#define ch341_can_LCR_ENABLE_RX    0x80
+#define ch341_can_LCR_ENABLE_TX    0x40
+#define ch341_can_LCR_MARK_SPACE   0x20
+#define ch341_can_LCR_PAR_EVEN     0x10
+#define ch341_can_LCR_ENABLE_PAR   0x08
+#define ch341_can_LCR_STOP_BITS_2  0x04
+#define ch341_can_LCR_CS8          0x03
+#define ch341_can_LCR_CS7          0x02
+#define ch341_can_LCR_CS6          0x01
+#define ch341_can_LCR_CS5          0x00
+
+
+
+static const struct usb_device_id id_table[] = {
+	{ USB_DEVICE(0x1a86, 0x7523) },
+	{ },
+};
+MODULE_DEVICE_TABLE(usb, id_table);
+
+struct ch341_can_private {
+	spinlock_t lock; /* access lock */
+	unsigned baud_rate; /* set baud rate */
+	u8 mcr;
+	u8 msr;
+	u8 lcr;
+};
+
+static void ch341_can_set_termios(struct tty_struct *tty,
+			      struct usb_serial_port *port,
+			      struct ktermios *old_termios);
+
+static int ch341_can_control_out(struct usb_device *dev, u8 request,
+			     u16 value, u16 index)
+{
+	int r;
+
+	dev_dbg(&dev->dev, "%s - (%02x,%04x,%04x)\n", __func__,
+		request, value, index);
+
+	r = usb_control_msg(dev, usb_sndctrlpipe(dev, 0), request,
+			    USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_OUT,
+			    value, index, NULL, 0, DEFAULT_TIMEOUT);
+	if (r < 0)
+		dev_err(&dev->dev, "failed to send control message: %d\n", r);
+
+	return r;
+}
+
+static int ch341_can_control_in(struct usb_device *dev,
+			    u8 request, u16 value, u16 index,
+			    char *buf, unsigned bufsize)
+{
+	int r;
+
+	dev_dbg(&dev->dev, "%s - (%02x,%04x,%04x,%u)\n", __func__,
+		request, value, index, bufsize);
+
+	r = usb_control_msg(dev, usb_rcvctrlpipe(dev, 0), request,
+			    USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_IN,
+			    value, index, buf, bufsize, DEFAULT_TIMEOUT);
+	if (r < (int)bufsize) {
+		if (r >= 0) {
+			dev_err(&dev->dev,
+				"short control message received (%d < %u)\n",
+				r, bufsize);
+			r = -EIO;
+		}
+
+		dev_err(&dev->dev, "failed to receive control message: %d\n",
+			r);
+		return r;
+	}
+
+	return 0;
+}
+
+#define ch341_can_CLKRATE		48000000
+#define ch341_can_CLK_DIV(ps, fact)	(1 << (12 - 3 * (ps) - (fact)))
+#define ch341_can_MIN_RATE(ps)	(ch341_can_CLKRATE / (ch341_can_CLK_DIV((ps), 1) * 512))
+
+static const speed_t ch341_can_min_rates[] = {
+	ch341_can_MIN_RATE(0),
+	ch341_can_MIN_RATE(1),
+	ch341_can_MIN_RATE(2),
+	ch341_can_MIN_RATE(3),
+};
+
+/*
+ * The device line speed is given by the following equation:
+ *
+ *	baudrate = 48000000 / (2^(12 - 3 * ps - fact) * div), where
+ *
+ *		0 <= ps <= 3,
+ *		0 <= fact <= 1,
+ *		2 <= div <= 256 if fact = 0, or
+ *		9 <= div <= 256 if fact = 1
+ */
+static int ch341_can_get_divisor(speed_t speed)
+{
+	unsigned int fact, div, clk_div;
+	int ps;
+
+	/*
+	 * Clamp to supported range, this makes the (ps < 0) and (div < 2)
+	 * sanity checks below redundant.
+	 */
+	speed = clamp(speed, 46U, 3000000U);
+
+	/*
+	 * Start with highest possible base clock (fact = 1) that will give a
+	 * divisor strictly less than 512.
+	 */
+	fact = 1;
+	for (ps = 3; ps >= 0; ps--) {
+		if (speed > ch341_can_min_rates[ps])
+			break;
+	}
+
+	if (ps < 0)
+		return -EINVAL;
+
+	/* Determine corresponding divisor, rounding down. */
+	clk_div = ch341_can_CLK_DIV(ps, fact);
+	div = ch341_can_CLKRATE / (clk_div * speed);
+
+	/* Halve base clock (fact = 0) if required. */
+	if (div < 9 || div > 255) {
+		div /= 2;
+		clk_div *= 2;
+		fact = 0;
+	}
+
+	if (div < 2)
+		return -EINVAL;
+
+	/*
+	 * Pick next divisor if resulting rate is closer to the requested one,
+	 * scale up to avoid rounding errors on low rates.
+	 */
+	if (16 * ch341_can_CLKRATE / (clk_div * div) - 16 * speed >=
+			16 * speed - 16 * ch341_can_CLKRATE / (clk_div * (div + 1)))
+		div++;
+
+	/*
+	 * Prefer lower base clock (fact = 0) if even divisor.
+	 *
+	 * Note that this makes the receiver more tolerant to errors.
+	 */
+	if (fact == 1 && div % 2 == 0) {
+		div /= 2;
+		fact = 0;
+	}
+
+	return (0x100 - div) << 8 | fact << 2 | ps;
+}
+
+static int ch341_can_set_baudrate_lcr(struct usb_device *dev,
+				  struct ch341_can_private *priv, u8 lcr)
+{
+	int val;
+	int r;
+
+	if (!priv->baud_rate)
+		return -EINVAL;
+
+	val = ch341_can_get_divisor(priv->baud_rate);
+	if (val < 0)
+		return -EINVAL;
+
+	/*
+	 * CH341A buffers data until a full endpoint-size packet (32 bytes)
+	 * has been received unless bit 7 is set.
+	 */
+	val |= BIT(7);
+
+	r = ch341_can_control_out(dev, ch341_can_REQ_WRITE_REG, 0x1312, val);
+	if (r)
+		return r;
+
+	r = ch341_can_control_out(dev, ch341_can_REQ_WRITE_REG, 0x2518, lcr);
+	if (r)
+		return r;
+
+	return r;
+}
+
+static int ch341_can_set_handshake(struct usb_device *dev, u8 control)
+{
+	return ch341_can_control_out(dev, ch341_can_REQ_MODEM_CTRL, ~control, 0);
+}
+
+static int ch341_can_get_status(struct usb_device *dev, struct ch341_can_private *priv)
+{
+	const unsigned int size = 2;
+	char *buffer;
+	int r;
+	unsigned long flags;
+
+	buffer = kmalloc(size, GFP_KERNEL);
+	if (!buffer)
+		return -ENOMEM;
+
+	r = ch341_can_control_in(dev, ch341_can_REQ_READ_REG, 0x0706, 0, buffer, size);
+	if (r < 0)
+		goto out;
+
+	spin_lock_irqsave(&priv->lock, flags);
+	priv->msr = (~(*buffer)) & ch341_can_BITS_MODEM_STAT;
+	spin_unlock_irqrestore(&priv->lock, flags);
+
+out:	kfree(buffer);
+	return r;
+}
+
+/* -------------------------------------------------------------------------- */
+
+static int ch341_can_configure(struct usb_device *dev, struct ch341_can_private *priv)
+{
+	const unsigned int size = 2;
+	char *buffer;
+	int r;
+
+	buffer = kmalloc(size, GFP_KERNEL);
+	if (!buffer)
+		return -ENOMEM;
+
+	/* expect two bytes 0x27 0x00 */
+	r = ch341_can_control_in(dev, ch341_can_REQ_READ_VERSION, 0, 0, buffer, size);
+	if (r < 0)
+		goto out;
+	dev_dbg(&dev->dev, "Chip version: 0x%02x\n", buffer[0]);
+
+	r = ch341_can_control_out(dev, ch341_can_REQ_SERIAL_INIT, 0, 0);
+	if (r < 0)
+		goto out;
+
+	r = ch341_can_set_baudrate_lcr(dev, priv, priv->lcr);
+	if (r < 0)
+		goto out;
+
+	r = ch341_can_set_handshake(dev, priv->mcr);
+
+out:	kfree(buffer);
+	return r;
+}
+
+static int ch341_can_port_probe(struct usb_serial_port *port)
+{
+	struct ch341_can_private *priv;
+	int r;
+
+	priv = kzalloc(sizeof(struct ch341_can_private), GFP_KERNEL);
+	if (!priv)
+		return -ENOMEM;
+
+	spin_lock_init(&priv->lock);
+	priv->baud_rate = DEFAULT_BAUD_RATE;
+	/*
+	 * Some CH340 devices appear unable to change the initial LCR
+	 * settings, so set a sane 8N1 default.
+	 */
+	priv->lcr = ch341_can_LCR_ENABLE_RX | ch341_can_LCR_ENABLE_TX | ch341_can_LCR_CS8;
+
+	r = ch341_can_configure(port->serial->dev, priv);
+	if (r < 0)
+		goto error;
+
+	usb_set_serial_port_data(port, priv);
+	return 0;
+
+error:	kfree(priv);
+	return r;
+}
+
+static int ch341_can_port_remove(struct usb_serial_port *port)
+{
+	struct ch341_can_private *priv;
+
+	priv = usb_get_serial_port_data(port);
+	kfree(priv);
+
+	return 0;
+}
+
+static int ch341_can_carrier_raised(struct usb_serial_port *port)
+{
+	struct ch341_can_private *priv = usb_get_serial_port_data(port);
+	if (priv->msr & ch341_can_BIT_DCD)
+		return 1;
+	return 0;
+}
+
+static void ch341_can_dtr_rts(struct usb_serial_port *port, int on)
+{
+	struct ch341_can_private *priv = usb_get_serial_port_data(port);
+	unsigned long flags;
+
+	/* drop DTR and RTS */
+	spin_lock_irqsave(&priv->lock, flags);
+	if (on)
+		priv->mcr |= ch341_can_BIT_RTS | ch341_can_BIT_DTR;
+	else
+		priv->mcr &= ~(ch341_can_BIT_RTS | ch341_can_BIT_DTR);
+	spin_unlock_irqrestore(&priv->lock, flags);
+	ch341_can_set_handshake(port->serial->dev, priv->mcr);
+}
+
+static void ch341_can_close(struct usb_serial_port *port)
+{
+	usb_serial_generic_close(port);
+	usb_kill_urb(port->interrupt_in_urb);
+}
+
+/* open this device, set default parameters */
+static int ch341_can_open(struct tty_struct *tty, struct usb_serial_port *port)
+{
+	struct ch341_can_private *priv = usb_get_serial_port_data(port);
+	int r;
+
+	if (tty)
+		ch341_can_set_termios(tty, port, NULL);
+
+	dev_dbg(&port->dev, "%s - submitting interrupt urb\n", __func__);
+	r = usb_submit_urb(port->interrupt_in_urb, GFP_KERNEL);
+	if (r) {
+		dev_err(&port->dev, "%s - failed to submit interrupt urb: %d\n",
+			__func__, r);
+		return r;
+	}
+
+	r = ch341_can_get_status(port->serial->dev, priv);
+	if (r < 0) {
+		dev_err(&port->dev, "failed to read modem status: %d\n", r);
+		goto err_kill_interrupt_urb;
+	}
+
+	r = usb_serial_generic_open(tty, port);
+	if (r)
+		goto err_kill_interrupt_urb;
+
+	return 0;
+
+err_kill_interrupt_urb:
+	usb_kill_urb(port->interrupt_in_urb);
+
+	return r;
+}
+
+/* Old_termios contains the original termios settings and
+ * tty->termios contains the new setting to be used.
+ */
+static void ch341_can_set_termios(struct tty_struct *tty,
+		struct usb_serial_port *port, struct ktermios *old_termios)
+{
+	struct ch341_can_private *priv = usb_get_serial_port_data(port);
+	unsigned baud_rate;
+	unsigned long flags;
+	u8 lcr;
+	int r;
+
+	/* redundant changes may cause the chip to lose bytes */
+	if (old_termios && !tty_termios_hw_change(&tty->termios, old_termios))
+		return;
+
+	baud_rate = tty_get_baud_rate(tty);
+
+	lcr = ch341_can_LCR_ENABLE_RX | ch341_can_LCR_ENABLE_TX;
+
+	switch (C_CSIZE(tty)) {
+	case CS5:
+		lcr |= ch341_can_LCR_CS5;
+		break;
+	case CS6:
+		lcr |= ch341_can_LCR_CS6;
+		break;
+	case CS7:
+		lcr |= ch341_can_LCR_CS7;
+		break;
+	case CS8:
+		lcr |= ch341_can_LCR_CS8;
+		break;
+	}
+
+	if (C_PARENB(tty)) {
+		lcr |= ch341_can_LCR_ENABLE_PAR;
+		if (C_PARODD(tty) == 0)
+			lcr |= ch341_can_LCR_PAR_EVEN;
+		if (C_CMSPAR(tty))
+			lcr |= ch341_can_LCR_MARK_SPACE;
+	}
+
+	if (C_CSTOPB(tty))
+		lcr |= ch341_can_LCR_STOP_BITS_2;
+
+	if (baud_rate) {
+		priv->baud_rate = baud_rate;
+
+		r = ch341_can_set_baudrate_lcr(port->serial->dev, priv, lcr);
+		if (r < 0 && old_termios) {
+			priv->baud_rate = tty_termios_baud_rate(old_termios);
+			tty_termios_copy_hw(&tty->termios, old_termios);
+		} else if (r == 0) {
+			priv->lcr = lcr;
+		}
+	}
+
+	spin_lock_irqsave(&priv->lock, flags);
+	if (C_BAUD(tty) == B0)
+		priv->mcr &= ~(ch341_can_BIT_DTR | ch341_can_BIT_RTS);
+	else if (old_termios && (old_termios->c_cflag & CBAUD) == B0)
+		priv->mcr |= (ch341_can_BIT_DTR | ch341_can_BIT_RTS);
+	spin_unlock_irqrestore(&priv->lock, flags);
+
+	ch341_can_set_handshake(port->serial->dev, priv->mcr);
+}
+
+static void ch341_can_break_ctl(struct tty_struct *tty, int break_state)
+{
+	const uint16_t ch341_can_break_reg =
+			((uint16_t) ch341_can_REG_LCR << 8) | ch341_can_REG_BREAK;
+	struct usb_serial_port *port = tty->driver_data;
+	int r;
+	uint16_t reg_contents;
+	uint8_t *break_reg;
+
+	break_reg = kmalloc(2, GFP_KERNEL);
+	if (!break_reg)
+		return;
+
+	r = ch341_can_control_in(port->serial->dev, ch341_can_REQ_READ_REG,
+			ch341_can_break_reg, 0, break_reg, 2);
+	if (r < 0) {
+		dev_err(&port->dev, "%s - USB control read error (%d)\n",
+				__func__, r);
+		goto out;
+	}
+	dev_dbg(&port->dev, "%s - initial ch341 break register contents - reg1: %x, reg2: %x\n",
+		__func__, break_reg[0], break_reg[1]);
+	if (break_state != 0) {
+		dev_dbg(&port->dev, "%s - Enter break state requested\n", __func__);
+		break_reg[0] &= ~ch341_can_NBREAK_BITS;
+		break_reg[1] &= ~ch341_can_LCR_ENABLE_TX;
+	} else {
+		dev_dbg(&port->dev, "%s - Leave break state requested\n", __func__);
+		break_reg[0] |= ch341_can_NBREAK_BITS;
+		break_reg[1] |= ch341_can_LCR_ENABLE_TX;
+	}
+	dev_dbg(&port->dev, "%s - New ch341 break register contents - reg1: %x, reg2: %x\n",
+		__func__, break_reg[0], break_reg[1]);
+	reg_contents = get_unaligned_le16(break_reg);
+	r = ch341_can_control_out(port->serial->dev, ch341_can_REQ_WRITE_REG,
+			ch341_can_break_reg, reg_contents);
+	if (r < 0)
+		dev_err(&port->dev, "%s - USB control write error (%d)\n",
+				__func__, r);
+out:
+	kfree(break_reg);
+}
+
+static int ch341_can_tiocmset(struct tty_struct *tty,
+			  unsigned int set, unsigned int clear)
+{
+	struct usb_serial_port *port = tty->driver_data;
+	struct ch341_can_private *priv = usb_get_serial_port_data(port);
+	unsigned long flags;
+	u8 control;
+
+	spin_lock_irqsave(&priv->lock, flags);
+	if (set & TIOCM_RTS)
+		priv->mcr |= ch341_can_BIT_RTS;
+	if (set & TIOCM_DTR)
+		priv->mcr |= ch341_can_BIT_DTR;
+	if (clear & TIOCM_RTS)
+		priv->mcr &= ~ch341_can_BIT_RTS;
+	if (clear & TIOCM_DTR)
+		priv->mcr &= ~ch341_can_BIT_DTR;
+	control = priv->mcr;
+	spin_unlock_irqrestore(&priv->lock, flags);
+
+	return ch341_can_set_handshake(port->serial->dev, control);
+}
+
+static void ch341_can_update_status(struct usb_serial_port *port,
+					unsigned char *data, size_t len)
+{
+	struct ch341_can_private *priv = usb_get_serial_port_data(port);
+	struct tty_struct *tty;
+	unsigned long flags;
+	u8 status;
+	u8 delta;
+
+	if (len < 4)
+		return;
+
+	status = ~data[2] & ch341_can_BITS_MODEM_STAT;
+
+	spin_lock_irqsave(&priv->lock, flags);
+	delta = status ^ priv->msr;
+	priv->msr = status;
+	spin_unlock_irqrestore(&priv->lock, flags);
+
+	if (data[1] & ch341_can_MULT_STAT)
+		dev_dbg(&port->dev, "%s - multiple status change\n", __func__);
+
+	if (!delta)
+		return;
+
+	if (delta & ch341_can_BIT_CTS)
+		port->icount.cts++;
+	if (delta & ch341_can_BIT_DSR)
+		port->icount.dsr++;
+	if (delta & ch341_can_BIT_RI)
+		port->icount.rng++;
+	if (delta & ch341_can_BIT_DCD) {
+		port->icount.dcd++;
+		tty = tty_port_tty_get(&port->port);
+		if (tty) {
+			usb_serial_handle_dcd_change(port, tty,
+						status & ch341_can_BIT_DCD);
+			tty_kref_put(tty);
+		}
+	}
+
+	wake_up_interruptible(&port->port.delta_msr_wait);
+}
+
+static void ch341_can_read_int_callback(struct urb *urb)
+{
+	struct usb_serial_port *port = urb->context;
+	unsigned char *data = urb->transfer_buffer;
+	unsigned int len = urb->actual_length;
+	int status;
+
+	switch (urb->status) {
+	case 0:
+		/* success */
+		break;
+	case -ECONNRESET:
+	case -ENOENT:
+	case -ESHUTDOWN:
+		/* this urb is terminated, clean up */
+		dev_dbg(&urb->dev->dev, "%s - urb shutting down: %d\n",
+			__func__, urb->status);
+		return;
+	default:
+		dev_dbg(&urb->dev->dev, "%s - nonzero urb status: %d\n",
+			__func__, urb->status);
+		goto exit;
+	}
+
+	usb_serial_debug_data(&port->dev, __func__, len, data);
+	ch341_can_update_status(port, data, len);
+exit:
+	status = usb_submit_urb(urb, GFP_ATOMIC);
+	if (status) {
+		dev_err(&urb->dev->dev, "%s - usb_submit_urb failed: %d\n",
+			__func__, status);
+	}
+}
+
+static int ch341_can_tiocmget(struct tty_struct *tty)
+{
+	struct usb_serial_port *port = tty->driver_data;
+	struct ch341_can_private *priv = usb_get_serial_port_data(port);
+	unsigned long flags;
+	u8 mcr;
+	u8 status;
+	unsigned int result;
+
+	spin_lock_irqsave(&priv->lock, flags);
+	mcr = priv->mcr;
+	status = priv->msr;
+	spin_unlock_irqrestore(&priv->lock, flags);
+
+	result = ((mcr & ch341_can_BIT_DTR)		? TIOCM_DTR : 0)
+		  | ((mcr & ch341_can_BIT_RTS)	? TIOCM_RTS : 0)
+		  | ((status & ch341_can_BIT_CTS)	? TIOCM_CTS : 0)
+		  | ((status & ch341_can_BIT_DSR)	? TIOCM_DSR : 0)
+		  | ((status & ch341_can_BIT_RI)	? TIOCM_RI  : 0)
+		  | ((status & ch341_can_BIT_DCD)	? TIOCM_CD  : 0);
+
+	dev_dbg(&port->dev, "%s - result = %x\n", __func__, result);
+
+	return result;
+}
+
+static int ch341_can_reset_resume(struct usb_serial *serial)
+{
+	struct usb_serial_port *port = serial->port[0];
+	struct ch341_can_private *priv;
+	int ret;
+
+	priv = usb_get_serial_port_data(port);
+	if (!priv)
+		return 0;
+
+	/* reconfigure ch341 serial port after bus-reset */
+	ch341_can_configure(serial->dev, priv);
+
+	if (tty_port_initialized(&port->port)) {
+		ret = usb_submit_urb(port->interrupt_in_urb, GFP_NOIO);
+		if (ret) {
+			dev_err(&port->dev, "failed to submit interrupt urb: %d\n",
+				ret);
+			return ret;
+		}
+
+		ret = ch341_can_get_status(port->serial->dev, priv);
+		if (ret < 0) {
+			dev_err(&port->dev, "failed to read modem status: %d\n",
+				ret);
+		}
+	}
+
+	return usb_serial_generic_resume(serial);
+}
+
+
+static int ch341_can_net_attach(struct usb_serial *serial);
+
+static struct usb_serial_driver ch341_can_device = {
+	.driver = {
+		.owner	= THIS_MODULE,
+		.name	= "ch341-can",
+	},
+	.id_table          = id_table,
+	.num_ports         = 1,
+	.open              = ch341_can_open,
+	.dtr_rts	   	   = ch341_can_dtr_rts,
+	.carrier_raised	   = ch341_can_carrier_raised,
+	.close             = ch341_can_close,
+	.set_termios       = ch341_can_set_termios,
+	.break_ctl         = ch341_can_break_ctl,
+	.tiocmget          = ch341_can_tiocmget,
+	.tiocmset          = ch341_can_tiocmset,
+	.tiocmiwait        = usb_serial_generic_tiocmiwait,
+	.read_int_callback = ch341_can_read_int_callback,
+	.port_probe        = ch341_can_port_probe,
+	.attach			   = ch341_can_net_attach,
+	.port_remove       = ch341_can_port_remove,
+	.reset_resume      = ch341_can_reset_resume,
+};
+
+static struct usb_serial_driver * const serial_drivers[] = {
+	&ch341_can_device, NULL
+};
+
+module_usb_serial_driver(serial_drivers, id_table);
+
+MODULE_LICENSE("GPL v2");
+
+/**************************************************************
+**************************************************************
+******************** CAN NET **********************************
+***************************************************************
+**************************************************************/
+
+struct ch341_can_struct {
 	struct can_priv can;
-	int magic;
-	struct tty_struct	*tty;		/* ptr to TTY structure	     */
-	struct net_device	*dev;		/* easy for intr handling    */
-	spinlock_t		lock;
-	struct work_struct	tx_work;	/* Flushes transmit buffer   */
-
-	/* These are pointers to the malloc()ed frame buffers. */
-	unsigned char		rbuff[SLC_MTU];	/* receiver buffer	     */
+	struct usb_serial_port *port;
+	
 	int			rcount;         /* received chars counter    */
 	int			rexpected;	/* expected chars counter    */
 	FRAME_STATE 		rstate; 	/* state of current receive  */
-	unsigned char		xbuff[SLC_MTU];	/* transmitter buffer	     */
-	unsigned char		*xhead;         /* pointer to next XMIT byte */
-	int			xleft;          /* bytes left in XMIT queue  */
-
-	unsigned long		flags;		/* Flag values/ mode etc     */
-	int candev_registered;
 	int mode;
 };
 
-static const struct can_bittiming_const hlcan_bittiming_const = {
-	.name = DRV_NAME,
+
+static const struct can_bittiming_const ch341_bittiming_const = {
+	.name = "ch341-can",
 	.tseg1_min = 2,
 	.tseg1_max = 16,
 	.tseg2_min = 2,
@@ -114,450 +802,9 @@ static const struct can_bittiming_const hlcan_bittiming_const = {
 	.brp_inc = 1,
 };
 
-static struct net_device **slcan_devs;
-
-/*
- * Protocol handling
- */
-#define IS_EXT_ID(type)({ \
-		(type & HLCAN_TYPE_MASK) == (HCLAN_EXT_REMOTE_FRAME) || \
-		(type & HLCAN_TYPE_MASK) == HLCAN_EXT_DATA_FRAME; })
-
-#define IS_REMOTE(type) ({ \
-		(type & HLCAN_TYPE_MASK) == HCLAN_EXT_REMOTE_FRAME || \
-		(type & HLCAN_TYPE_MASK) == HCLAN_STD_REMOTE_FRAME; })
-
-/* checks if bit 7 and 6 is set */
-#define IS_DATA_PACKAGE(type) ({ \
-		((type >> 6) ^ 3) == 0;})
-
-#define GET_FRAME_ID(frame)({ 	   		\
-	 IS_EXT_ID(frame[1]) 			\
-		?	(frame[5] << 24) |	\
-			(frame[4] << 16) |	\
-			(frame[3] << 8)  |	\
-			(frame[2])		\
-		: 	((frame[3] << 8) |	\
-			frame[2]);})
-
-#define GET_DLC(type) ({type & 0x0f;})
-
-
-
- /************************************************************************
-  *			HL340 ENCAPSULATION FORMAT			 *
-  ************************************************************************/
-
-/*
- * A CAN frame has a can_id (11 bit standard frame format OR 29 bit extended
- * frame format) a data length code (can_dlc) which can be from 0 to 8
- * and up to <can_dlc> data bytes as payload.
- * Additionally a CAN frame may become a remote transmission frame if the
- * RTR-bit is set. This causes another ECU to send a CAN frame with the
- * given can_id.
- *
- * The HL340 ASCII representation of these different frame types is:
- * <start> <type> <id> <dlc> <data>* <end>
- *
- * Extended frames (29 bit) are defined by the type byte
- * Type byte is defined as 0xc0 as constant and the following values for type
- * bit 5: frame type
- *  0 = 11 bit frame
- *  1 = 29 bit frame
- * bit 4:
- *  0 = data frame 
- *  1 = remote frame
- * bit 0-3: dlc
- *
- * The <id> is 2 (standard) or 4 (extended) bytes
- * The <dlc> is encoded in 4 bit
- * The <data> has as much data bytes in it as defined dlc
- */
-
- /************************************************************************
-  *			STANDARD SLCAN DECAPSULATION			 *
-  ************************************************************************/
-
-/* Send one completely decapsulated can_frame to the network layer */
-static void slc_bump(struct slcan *sl)
-{
-	struct sk_buff *skb;
-	struct can_frame cf;
-	unsigned char data_start = 4;
-	/* idx 0 = packet header, skip it */
-	unsigned char *cmd = sl->rbuff + 1;
-	
-	cf.can_dlc = GET_DLC(*cmd);
-	cf.can_id = GET_FRAME_ID(sl->rbuff);
-	
-	if (IS_REMOTE(*cmd)){
-		cf.can_id |= CAN_RTR_FLAG;
-		data_start = 6;
-	}
-
-	// echo mode aligns data a bit differnet
-	if (sl->mode == 1 || sl->mode == 3){
-		data_start--;
-	}
-
-	if (IS_EXT_ID(*cmd)) {
-		cf.can_id |= CAN_EFF_FLAG;
-	}
-	*(u64 *) (&cf.data) = 0; /* clear payload */
-	/* RTR frames may have a dlc > 0 but they never have any data bytes */
-	if (!(cf.can_id & CAN_RTR_FLAG)) {
-		memcpy(cf.data, 
-			cmd + data_start,
-			cf.can_dlc);
-	}
-
-	skb = dev_alloc_skb(sizeof(struct can_frame) +
-			    sizeof(struct can_skb_priv));
-	if (!skb)
-		return;
-
-	skb->dev = sl->dev;
-	skb->protocol = htons(ETH_P_CAN);
-	skb->pkt_type = PACKET_BROADCAST;
-	skb->ip_summed = CHECKSUM_UNNECESSARY;
-
-	can_skb_reserve(skb);
-	can_skb_prv(skb)->ifindex = sl->dev->ifindex;
-	can_skb_prv(skb)->skbcnt = 0;
-
-	skb_put_data(skb, &cf, sizeof(struct can_frame));
-
-	sl->dev->stats.rx_packets++;
-	sl->dev->stats.rx_bytes += cf.can_dlc;
-	netif_rx(skb);
-}
-
-/* get the state of the current receive transmission */
-static void hlcan_update_rstate(struct slcan *sl)
-{
-	if (sl->rcount > 0) {
-		if (sl->rbuff[0] != HLCAN_PACKET_START) {
-			/* Need to sync on 0xaa at start of frames, so just skip. */
-			sl->rstate = MISSED_HEADER;
-			 return;
-		}
-	}
-
-	if (sl->rcount < 2) {
-		sl->rstate = RECEIVING;
-		return;
-	}
-
-	if (sl->rbuff[1] == HLCAN_CFG_PACKAGE_TYPE) {
-		if (sl->rcount >= HLCAN_CFG_PACKAGE_LEN) {
-			/* will be handled by userspace tool */
-			sl->rstate = COMPLETE;
-		} else {
-			sl->rstate = RECEIVING;
-		}
-	} else if (IS_DATA_PACKAGE(sl->rbuff[1])) {
-		/* Data frame... */
-		int ext_id = IS_EXT_ID(sl->rbuff[1]) ? 4 : 2;
-		int dlc = GET_DLC(sl->rbuff[1]);
-		
-		sl->rexpected =	1 + // HLCAN_PACKET_START
-			1 + // type byte
-			ext_id +
-			dlc + 
-			1; // HLCAN_PACKET_END
-		
-		if (sl->rcount >= sl->rexpected){
-			sl->rstate = COMPLETE;
-		} else {
-			sl->rstate = RECEIVING;
-		}
-	} else {
-		/* Unhandled frame type. */
-		sl->rstate = NONE;
-	}
-}
-
-/* parse tty input stream */
-static void slcan_unesc(struct slcan *sl, unsigned char s)
-{
-	if (test_and_clear_bit(SLF_ERROR, &sl->flags)) {
-		return;
-	}
-
-	if (sl->rcount > SLC_MTU) {
-		sl->dev->stats.rx_over_errors++;
-		set_bit(SLF_ERROR, &sl->flags);
-		return;
-	}
-
-	sl->rbuff[sl->rcount++] = s;
-
-	/* Only check state again after we received enough data */
-	if (RECEIVING == sl->rstate
-		&& sl->rexpected > 0
-		&& sl->rcount < sl->rexpected) {
-		return;
-	}
-	
-	hlcan_update_rstate(sl);
-	switch(sl->rstate) {
-		case COMPLETE:
-			if (IS_DATA_PACKAGE(sl->rbuff[1])) {
-				slc_bump(sl);
-			}
-			sl->rexpected = 0;
-			/* fall through */
-		case MISSED_HEADER:
-			sl->rcount = 0;
-			break;
-		default: break;
-	}
-}
-
-/************************************************************************
- *			STANDARD SLCAN ENCAPSULATION			*
- ************************************************************************/
-
-/* Encapsulate one can_frame and stuff into a TTY queue. */
-static void slc_encaps(struct slcan *sl, struct can_frame *cf)
-{
-	int actual, i;
-	unsigned char *pos;
-	u32 id;
-
-
-	pos = sl->xbuff;
-	*pos++ = HLCAN_PACKET_START;
-	
-	*pos = HLCAN_FRAME_PREFIX;
-	*pos |= cf->can_dlc;
-	if (cf->can_id & CAN_RTR_FLAG) {
-		*pos &= HLCAN_FLAG_RTR;
-	}
-
-	/* setup the frame id id */
-	/* mask the upper 3 bits because they are used for flags */
-	id = cf->can_id & 0x1FFFFFFF;
-	if (cf->can_id & CAN_EFF_FLAG) {
-		*pos++ &= HLCAN_FLAG_ID_EXT;
-		*pos++ = (unsigned char) (id & 0xFF);
-		*pos++ = (unsigned char) ((id >> 8) & 0xFF);
-		*pos++ = (unsigned char) ((id >> 16) & 0xFF);
-		*pos++ = (unsigned char) ((id >> 24) & 0xFF);
-	} else {
- 		++pos;
-		*pos++ = (unsigned char) (id & 0xFF);
-		*pos++ = (unsigned char) ((id >> 8) & 0xFF);
-	}
-
-	/* RTR frames may have a dlc > 0 but they never have any data bytes */
-	if (!(cf->can_id & CAN_RTR_FLAG)) {
-		for (i = 0; i < cf->can_dlc; i++)
-			*pos++ = cf->data[i];
-	}
-
-	*pos++ = HLCAN_PACKET_END;
-
-	/* Order of next two lines is *very* important.
-	 * When we are sending a little amount of data,
-	 * the transfer may be completed inside the ops->write()
-	 * routine, because it's running with interrupts enabled.
-	 * In this case we *never* got WRITE_WAKEUP event,
-	 * if we did not request it before write operation.
-	 *       14 Oct 1994  Dmitry Gorodchanin.
-	 */
-	set_bit(TTY_DO_WRITE_WAKEUP, &sl->tty->flags);
-	actual = sl->tty->ops->write(sl->tty, sl->xbuff, pos - sl->xbuff);
-	sl->xleft = (pos - sl->xbuff) - actual;
-	sl->xhead = sl->xbuff + actual;
-	sl->dev->stats.tx_bytes += cf->can_dlc;
-}
-
-/* Write out any remaining transmit buffer. Scheduled when tty is writable */
-static void slcan_transmit(struct work_struct *work)
-{
-	struct slcan *sl = container_of(work, struct slcan, tx_work);
-	int actual;
-
-	spin_lock_bh(&sl->lock);
-	/* First make sure we're connected. */
-	if (!sl->tty || sl->magic != HLCAN_MAGIC || !netif_running(sl->dev)) {
-		spin_unlock_bh(&sl->lock);
-		return;
-	}
-
-	if (sl->xleft <= 0)  {
-		/* Now serial buffer is almost free & we can start
-		 * transmission of another packet */
-		sl->dev->stats.tx_packets++;
-		clear_bit(TTY_DO_WRITE_WAKEUP, &sl->tty->flags);
-		spin_unlock_bh(&sl->lock);
-		netif_wake_queue(sl->dev);
-		return;
-	}
-
-	actual = sl->tty->ops->write(sl->tty, sl->xhead, sl->xleft);
-	sl->xleft -= actual;
-	sl->xhead += actual;
-	spin_unlock_bh(&sl->lock);
-}
-
-/*
- * Called by the driver when there's room for more data.
- * Schedule the transmit.
- */
-static void slcan_write_wakeup(struct tty_struct *tty)
-{
-	struct slcan *sl = tty->disc_data;
-
-	schedule_work(&sl->tx_work);
-}
-
-/* Send a can_frame to a TTY queue. */
-static netdev_tx_t slc_xmit(struct sk_buff *skb, struct net_device *dev)
-{
-	struct slcan *sl = netdev_priv(dev);
-
-	if (skb->len != CAN_MTU)
-		goto out;
-
-	spin_lock(&sl->lock);
-	if (!netif_running(dev))  {
-		spin_unlock(&sl->lock);
-		printk(KERN_WARNING "%s: xmit: iface is down\n", dev->name);
-		goto out;
-	}
-	if (sl->tty == NULL) {
-		spin_unlock(&sl->lock);
-		goto out;
-	}
-
-	netif_stop_queue(sl->dev);
-	slc_encaps(sl, (struct can_frame *) skb->data); /* encaps & send */
-	spin_unlock(&sl->lock);
-
-out:
-	kfree_skb(skb);
-	return NETDEV_TX_OK;
-}
-
-
-/******************************************
- *   Routines looking at netdevice side.
- ******************************************/
-
-/* Netdevice UP -> DOWN routine */
-static int slc_close(struct net_device *dev)
-{
-	struct slcan *sl = netdev_priv(dev);
-
-	spin_lock_bh(&sl->lock);
-	if (sl->tty) {
-		/* TTY discipline is running. */
-		clear_bit(TTY_DO_WRITE_WAKEUP, &sl->tty->flags);
-	}
-	netif_stop_queue(dev);
-	sl->rcount   = 0;
-	sl->xleft    = 0;
-	spin_unlock_bh(&sl->lock);
-
-	sl->can.state = CAN_STATE_STOPPED;
-	close_candev(dev);
-
-	return 0;
-}
-
-/* Netdevice DOWN -> UP routine */
-static int slc_open(struct net_device *dev)
-{
+static int ch341_can_net_do_set_mode(struct net_device *dev, enum can_mode mode){
 	int ret;
-	struct slcan *sl = netdev_priv(dev);
-
-	if (sl->tty == NULL)
-		return -ENODEV;
-
-	/* Common open */
-	ret = open_candev(dev);
-	if (ret) {
-		return ret;
-	}
-
-	sl->flags &= (1 << SLF_INUSE);
-	sl->can.state = CAN_STATE_ERROR_ACTIVE;
-	netif_start_queue(dev);
-	return 0;
-}
-
-static const struct net_device_ops slc_netdev_ops = {
-	.ndo_open               = slc_open,
-	.ndo_stop               = slc_close,
-	.ndo_start_xmit         = slc_xmit,
-	.ndo_change_mtu         = can_change_mtu,
-};
-
-
-/******************************************
-  Routines looking at TTY side.
- ******************************************/
-
-/*
- * Handle the 'receiver data ready' interrupt.
- * This function is called by the 'tty_io' module in the kernel when
- * a block of SLCAN data has been received, which can now be decapsulated
- * and sent on to some IP layer for further processing. This will not
- * be re-entered while running but other ldisc functions may be called
- * in parallel
- */
-static void slcan_receive_buf(struct tty_struct *tty,
-			      const unsigned char *cp, char *fp, int count)
-{
-	struct slcan *sl = (struct slcan *) tty->disc_data;
-
-	if (!sl || sl->magic != HLCAN_MAGIC || !netif_running(sl->dev)){
-		printk("hlcan: Serial device not ready\n");
-		return;
-	}
-
-	/* Read the characters out of the buffer */
-	while (count--) {
-		if (fp && *fp++) {
-			if (!test_and_set_bit(SLF_ERROR, &sl->flags))
-				sl->dev->stats.rx_errors++;
-			cp++;
-			continue;
-		}
-		slcan_unesc(sl, *cp++);
-	}
-}
-
-/************************************
- *  slcan_open helper routines.
- ************************************/
-
-/* Collect hanged up channels */
-static void slc_sync(void)
-{
-	int i;
-	struct net_device *dev;
-	struct slcan	  *sl;
-
-	for (i = 0; i < maxdev; i++) {
-		dev = slcan_devs[i];
-		if (dev == NULL)
-			break;
-
-		sl = netdev_priv(dev);
-		if (sl->tty)
-			continue;
-		if (dev->flags & IFF_UP)
-			dev_close(dev);
-	}
-}
-
-
-static int hlcan_do_set_mode(struct net_device *dev, enum can_mode mode){
-	int ret;
-	struct slcan *sl = netdev_priv(dev);
+	struct ch341_can_struct *sl = netdev_priv(dev);
 
 	switch (mode) {
 	case CAN_MODE_START:
@@ -568,308 +815,69 @@ static int hlcan_do_set_mode(struct net_device *dev, enum can_mode mode){
 	}
 }
 
-
-/* Find a free SLCAN channel, and link in this `tty' line. */
-static struct slcan *slc_alloc(void)
+static int ch341_can_net_open(struct net_device *netdev)
 {
-	int i;
-	char name[IFNAMSIZ];
-	struct net_device *dev = NULL;
-	struct slcan       *sl;
+	return -1;
+}
 
-	for (i = 0; i < maxdev; i++) {
-		dev = slcan_devs[i];
-		if (dev == NULL)
-			break;
-	}
+static netdev_tx_t ch341_can_net_start_xmit(struct sk_buff *skb,
+				      struct net_device *netdev)
+{
+	return -1;
+}
 
-	/* Sorry, too many, all slots in use */
-	if (i >= maxdev)
-		return NULL;
-
-	sprintf(name, "hlcan%d", i);
-	dev = alloc_candev(sizeof(*sl), 1);
-	if (!dev)
-		return NULL;
-
-	sl = netdev_priv(dev);
+static int ch341_can_net_close(struct net_device *netdev)
+{
 	
-	dev->netdev_ops = &slc_netdev_ops;
-	// Device does NOT echo on itself
-	// dev->flags |= IFF_ECHO;
-
-	/* this does not actually matter when we use the serial port */
-	/* todo set this to a propper value */
-	sl->can.clock.freq = 3686400000; 
-	sl->can.data_bittiming_const = &hlcan_bittiming_const;
-	sl->can.bittiming.bitrate = 800000;
-	sl->can.do_set_mode = hlcan_do_set_mode;
-	sl->can.ctrlmode_supported = CAN_CTRLMODE_LOOPBACK |
-		CAN_CTRLMODE_3_SAMPLES | 
-		CAN_CTRLMODE_FD |
-		CAN_CTRLMODE_LISTENONLY;
-
-	dev->base_addr = i;
-
-	/* Initialize channel control data */
-	sl->magic = HLCAN_MAGIC;
-	sl->rstate = NONE;
-	sl->dev	= dev;
-	sl->mode = 0;
-	spin_lock_init(&sl->lock);
-	INIT_WORK(&sl->tx_work, slcan_transmit);
-	slcan_devs[i] = dev;
-
-	return sl;
+	return -1;
 }
 
-/*
- * Open the high-level part of the SLCAN channel.
- * This function is called by the TTY module when the
- * SLCAN line discipline is called for.  Because we are
- * sure the tty line exists, we only have to link it to
- * a free SLCAN channel...
- *
- * Called in process context serialized from other ldisc calls.
- */
-static int slcan_open(struct tty_struct *tty)
-{
-	struct slcan *sl;
-	int err;
-
-	if (!capable(CAP_NET_ADMIN))
-		return -EPERM;
-
-	if (tty->ops->write == NULL)
-		return -EOPNOTSUPP;
-
-	/* sync concurrent opens on global lock */
-	spin_lock_bh(&global_lock);
-
-	/* Collect hanged up channels. */
-	slc_sync();
-
-	sl = tty->disc_data;
-
-	err = -EEXIST;
-	/* First make sure we're not already connected. */
-	if (sl && sl->magic == HLCAN_MAGIC)
-		goto err_exit;
-
-	/* OK.  Find a free SLCAN channel to use. */
-	err = -ENFILE;
-	sl = slc_alloc();
-	
-	SET_NETDEV_DEV(sl->dev, tty->dev);
-	if (sl == NULL) {
-		err = -ENOMEM;
-		goto err_exit;
-	}
-
-	sl->tty = tty;
-	tty->disc_data = sl;
-
-	if (!test_bit(SLF_INUSE, &sl->flags)) {
-		/* Perform the low-level SLCAN initialization. */
-		sl->rcount   = 0;
-		sl->xleft    = 0;
-
-		set_bit(SLF_INUSE, &sl->flags);
-
-		err = register_candev(sl->dev);
-		if (err)
-			goto err_free_chan;
-
-		sl->candev_registered = 1;
-	}
-
-	/* Done.  We have linked the TTY line to a channel. */
-	spin_unlock_bh(&global_lock);
-	tty->receive_room = 65536;	/* We don't flow control */
-
-	/* TTY layer expects 0 on success */
-	return 0;
-
-err_free_chan:
-	sl->tty = NULL;
-	tty->disc_data = NULL;
-	clear_bit(SLF_INUSE, &sl->flags);
-
-err_exit:
-	spin_unlock_bh(&global_lock);
-	/* Count references from TTY module */
-	return err;
-}
-
-/*
- * Close down a SLCAN channel.
- * This means flushing out any pending queues, and then returning. This
- * call is serialized against other ldisc functions.
- *
- * We also use this method for a hangup event.
- */
-
-static void slcan_close(struct tty_struct *tty)
-{
-	struct slcan *sl = (struct slcan *) tty->disc_data;
-
-	/* First make sure we're connected. */
-	if (!sl || sl->magic != HLCAN_MAGIC || sl->tty != tty)
-		return;
-
-	spin_lock_bh(&sl->lock);
-	tty->disc_data = NULL;
-	sl->tty = NULL;
-	spin_unlock_bh(&sl->lock);
-
-	flush_work(&sl->tx_work);
-
-	/* Flush network side */
-	unregister_candev(sl->dev);
-	sl->candev_registered = 0;
-	/* This will complete via sl_free_netdev */
-}
-
-static int slcan_hangup(struct tty_struct *tty)
-{
-	slcan_close(tty);
-	return 0;
-}
-
-/* Perform I/O control on an active SLCAN channel. */
-static int slcan_ioctl(struct tty_struct *tty, struct file *file,
-		       unsigned int cmd, unsigned long arg)
-{
-	struct slcan *sl = (struct slcan *) tty->disc_data;
-	unsigned int tmp;
-
-	/* First make sure we're connected. */
-	if (!sl || sl->magic != HLCAN_MAGIC)
-		return -EINVAL;
-
-	switch (cmd) {
-	case SIOCGIFNAME:
-		tmp = strlen(sl->dev->name) + 1;
-		if (copy_to_user((void __user *)arg, sl->dev->name, tmp))
-			return -EFAULT;
-		return 0;
-
-	case SIOCSIFHWADDR:
-		return -EINVAL;
-
-	case IO_CTL_MODE:
-		sl->mode = arg;
-		printk("hlcan: new device mode %i\n", sl->mode);
-		if (sl->mode == 1 || sl->mode == 3){
-			sl->dev->flags |= IFF_ECHO;
-		}
-			
-		return 0;
-
-	default:
-		return tty_mode_ioctl(tty, file, cmd, arg);
-	}
-}
-
-
-
-static struct tty_ldisc_ops slc_ldisc = {
-	.owner		= THIS_MODULE,
-	.magic		= TTY_LDISC_MAGIC,
-	.name		= "hlcan",
-	.open		= slcan_open,
-	.close		= slcan_close,
-	.hangup		= slcan_hangup,
-	.ioctl		= slcan_ioctl,
-	.receive_buf	= slcan_receive_buf,
-	.write_wakeup	= slcan_write_wakeup,
+static const struct net_device_ops ch341_can_net_netdev_ops = {
+	.ndo_open = ch341_can_net_open,
+	.ndo_stop = ch341_can_net_close,
+	.ndo_start_xmit = ch341_can_net_start_xmit,
+	.ndo_change_mtu = can_change_mtu,
 };
 
-static int __init slcan_init(void)
-{
-	int status;
 
-	if (maxdev < 4)
-		maxdev = 4; /* Sanity */
+static int ch341_can_net_attach(struct usb_serial *serial){
+	struct net_device *netdev;
+	struct ch341_can_struct *priv;
+	struct device *dev = &serial->interface->dev;
+	int err = 0;
 
-	pr_info("hlcan: QinHeng serial line CAN interface driver\n");
-	pr_info("hlcan: %d dynamic interface channels.\n", maxdev);
-
-	slcan_devs = kcalloc(maxdev, sizeof(struct net_device *), GFP_KERNEL);
-	if (!slcan_devs)
-		return -ENOMEM;
-
-	/* Fill in our line protocol discipline, and register it */
-	status = tty_register_ldisc(N_HLCAN, &slc_ldisc);
-	if (status)  {
-		printk(KERN_ERR "hlcan: can't register line discipline\n");
-		kfree(slcan_devs);
-	}
-	spin_lock_init(&global_lock);
-
-	return status;
-}
-
-static void __exit slcan_exit(void)
-{
-	unsigned long timeout = jiffies + HZ;
-	struct net_device *dev;
-	struct slcan *sl;
-	int busy = 0;
-	int i;
-
-	if (slcan_devs == NULL)
-		return;
-
-	/*
-	 * First of all: check for active disciplines and hangup them.
-	 */
-	do {
-		if (busy)
-			msleep_interruptible(100);
-
-		busy = 0;
-		for (i = 0; i < maxdev; i++) {
-			dev = slcan_devs[i];
-			if (!dev)
-				continue;
-			sl = netdev_priv(dev);
-			spin_lock_bh(&sl->lock);
-			if (sl->tty) {
-				busy++;
-				tty_hangup(sl->tty);
-			}
-			spin_unlock_bh(&sl->lock);
-		}
-	} while (busy && time_before(jiffies, timeout));
-
-	/* FIXME: hangup is async so we should wait when doing this second
-	   phase */
-
-	for (i = 0; i < maxdev; i++) {
-		dev = slcan_devs[i];
-		if (!dev)
-			continue;
-
-		slcan_devs[i] = NULL;
-
-		sl = netdev_priv(dev);
-		if (sl->tty) {
-			printk(KERN_ERR "%s: tty discipline still running\n",
-			       dev->name);
-		}
-
-		if (sl->candev_registered)
-			unregister_candev(dev);
+	netdev = alloc_candev(sizeof(*priv), 1);
+	if (!netdev) {
+		dev_err(dev, "couldn't alloc candev\n");
+		err = -ENOMEM;
+		return err;
 	}
 
-	kfree(slcan_devs);
-	slcan_devs = NULL;
+	priv = netdev_priv(netdev);
 
-	i = tty_unregister_ldisc(N_HLCAN);
-	if (i)
-		printk(KERN_ERR "hlcan: can't unregister ldisc (err %d)\n", i);
+	priv->can.state = CAN_STATE_STOPPED;
+	priv->can.ctrlmode_supported = CAN_CTRLMODE_LISTENONLY;
+	
+	/* todo set this to a propper value */
+	priv->can.clock.freq = 3686400000; 
+	priv->can.data_bittiming_const = &ch341_bittiming_const;
+	priv->can.bittiming.bitrate = 800000;
+	priv->can.do_set_mode = ch341_can_net_do_set_mode;
+	priv->can.ctrlmode_supported = CAN_CTRLMODE_LOOPBACK |
+		CAN_CTRLMODE_3_SAMPLES | 
+		CAN_CTRLMODE_LISTENONLY;
+	netdev->netdev_ops = &ch341_can_net_netdev_ops;
+
+	SET_NETDEV_DEV(netdev, dev);
+	netdev->dev_id = 0;
+	err = register_candev(netdev);
+	if (err) {
+		dev_err(dev, "couldn't register CAN device: %d\n", err);
+		free_candev(netdev);
+		err = -ENOMEM;
+		return err;
+	}
+
+	netdev_info(netdev, "device %s registered\n", netdev->name);
+	return err;
 }
-
-module_init(slcan_init);
-module_exit(slcan_exit);
