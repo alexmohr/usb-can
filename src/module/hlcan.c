@@ -153,6 +153,8 @@ static void ch341_can_set_termios(struct tty_struct *tty,
 			      struct usb_serial_port *port,
 			      struct ktermios *old_termios);
 
+static int ch341_can_net_attach(struct usb_serial_port *port);
+
 static int ch341_can_control_out(struct usb_device *dev, u8 request,
 			     u16 value, u16 index)
 {
@@ -390,7 +392,7 @@ static int ch341_can_port_probe(struct usb_serial_port *port)
 		goto error;
 
 	usb_set_serial_port_data(port, priv);
-	return 0;
+	return ch341_can_net_attach(port);
 
 error:	kfree(priv);
 	return r;
@@ -740,7 +742,7 @@ static int ch341_can_reset_resume(struct usb_serial *serial)
 }
 
 
-static int ch341_can_net_attach(struct usb_serial *serial);
+
 
 static struct usb_serial_driver ch341_can_device = {
 	.driver = {
@@ -760,7 +762,7 @@ static struct usb_serial_driver ch341_can_device = {
 	.tiocmiwait        = usb_serial_generic_tiocmiwait,
 	.read_int_callback = ch341_can_read_int_callback,
 	.port_probe        = ch341_can_port_probe,
-	.attach			   = ch341_can_net_attach,
+	//.attach			   = ch341_can_net_attach,
 	.port_remove       = ch341_can_port_remove,
 	.reset_resume      = ch341_can_reset_resume,
 };
@@ -814,7 +816,7 @@ static int ch341_can_net_do_set_mode(struct net_device *dev, enum can_mode mode)
 		return -EOPNOTSUPP;
 	}
 }
-
+// /home/me/dev/linux/drivers/net/can/usb/esd_usb2.c
 static int ch341_can_net_open(struct net_device *netdev)
 {
 	return -1;
@@ -840,10 +842,10 @@ static const struct net_device_ops ch341_can_net_netdev_ops = {
 };
 
 
-static int ch341_can_net_attach(struct usb_serial *serial){
+static int ch341_can_net_attach(struct usb_serial_port *port){
 	struct net_device *netdev;
 	struct ch341_can_struct *priv;
-	struct device *dev = &serial->interface->dev;
+	struct device *dev = &port->serial->interface->dev;
 	int err = 0;
 
 	netdev = alloc_candev(sizeof(*priv), 1);
@@ -854,6 +856,7 @@ static int ch341_can_net_attach(struct usb_serial *serial){
 	}
 
 	priv = netdev_priv(netdev);
+	priv->port = port;
 
 	priv->can.state = CAN_STATE_STOPPED;
 	priv->can.ctrlmode_supported = CAN_CTRLMODE_LISTENONLY;
