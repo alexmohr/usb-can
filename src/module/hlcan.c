@@ -84,6 +84,19 @@ typedef enum {
 #define DEFAULT_BAUD_RATE 9600
 #define DEFAULT_TIMEOUT   1000
 
+struct ch341_can_struct {
+	struct can_priv can;
+	struct usb_serial_port *port;
+	struct net_device *netdev;
+	
+	int			rcount;         /* received chars counter    */
+	int			rexpected;	/* expected chars counter    */
+	FRAME_STATE 		rstate; 	/* state of current receive  */
+	int mode;
+};
+
+
+
 /* flags for IO-Bits */
 #define ch341_can_BIT_RTS (1 << 6)
 #define ch341_can_BIT_DTR (1 << 5)
@@ -147,13 +160,14 @@ struct ch341_can_private {
 	u8 mcr;
 	u8 msr;
 	u8 lcr;
+	struct ch341_can_struct* can;
 };
 
 static void ch341_can_set_termios(struct tty_struct *tty,
 			      struct usb_serial_port *port,
 			      struct ktermios *old_termios);
 
-static int ch341_can_net_attach(struct usb_serial_port *port);
+static int ch341_can_net_attach(struct usb_serial_port *port, struct ch341_can_private *serialPriv);
 
 static int ch341_can_control_out(struct usb_device *dev, u8 request,
 			     u16 value, u16 index)
@@ -392,7 +406,7 @@ static int ch341_can_port_probe(struct usb_serial_port *port)
 		goto error;
 
 	usb_set_serial_port_data(port, priv);
-	return ch341_can_net_attach(port);
+	return ch341_can_net_attach(port, priv);
 
 error:	kfree(priv);
 	return r;
@@ -403,7 +417,12 @@ static int ch341_can_port_remove(struct usb_serial_port *port)
 	struct ch341_can_private *priv;
 
 	priv = usb_get_serial_port_data(port);
+
+	unregister_netdev(priv->can->netdev);
+	free_candev(priv->can->netdev);
+	
 	kfree(priv);
+
 
 	return 0;
 }
@@ -762,7 +781,6 @@ static struct usb_serial_driver ch341_can_device = {
 	.tiocmiwait        = usb_serial_generic_tiocmiwait,
 	.read_int_callback = ch341_can_read_int_callback,
 	.port_probe        = ch341_can_port_probe,
-	//.attach			   = ch341_can_net_attach,
 	.port_remove       = ch341_can_port_remove,
 	.reset_resume      = ch341_can_reset_resume,
 };
@@ -780,17 +798,6 @@ MODULE_LICENSE("GPL v2");
 ******************** CAN NET **********************************
 ***************************************************************
 **************************************************************/
-
-struct ch341_can_struct {
-	struct can_priv can;
-	struct usb_serial_port *port;
-	
-	int			rcount;         /* received chars counter    */
-	int			rexpected;	/* expected chars counter    */
-	FRAME_STATE 		rstate; 	/* state of current receive  */
-	int mode;
-};
-
 
 static const struct can_bittiming_const ch341_bittiming_const = {
 	.name = "ch341-can",
@@ -816,10 +823,99 @@ static int ch341_can_net_do_set_mode(struct net_device *dev, enum can_mode mode)
 		return -EOPNOTSUPP;
 	}
 }
+
+static int ch341_can_net_open_uart(struct ch341_can_struct *priv) {
+	
+	int fd;
+	char name[50];
+	
+	sprintf(name, "/dev/ttyUSB%i", priv->port->minor);
+	printk(name);
+	printk("\n");
+
+	return -1;
+#if 0
+	fd = open(ttypath, O_RDWR | O_NONBLOCK | O_NOCTTY);
+	if (fd < 0) {
+		syslogger(LOG_NOTICE, "failed to open TTY device %s\n", ttypath);
+		perror(ttypath);
+		exit(EXIT_FAILURE);
+	}
+
+	if (ioctl(fd, TCGETS2, &tios) < 0) {
+		syslogger(LOG_NOTICE, "ioctl() failed: %s\n", strerror(errno));
+		close(fd);
+		exit(EXIT_FAILURE);
+	}
+
+	tios.c_cflag &= ~CBAUD;
+	tios.c_cflag = BOTHER | CS8 | CSTOPB;
+	tios.c_iflag = IGNPAR;
+	tios.c_oflag = 0;
+	tios.c_lflag = 0;
+	tios.c_ispeed = (speed_t) uart_speed;
+	tios.c_ospeed = (speed_t) uart_speed;
+
+	// Because of a recent change in linux - https://patchwork.kernel.org/patch/9589541/
+	// we need to set low latency flag to get proper receive latency
+	struct serial_struct snew;
+	ioctl (fd, TIOCGSERIAL, &snew);
+	snew.flags |= ASYNC_LOW_LATENCY;
+	ioctl (fd, TIOCSSERIAL, &snew);
+
+	if (ioctl(fd, TCSETS2, &tios) < 0) {
+		syslogger(LOG_NOTICE, "ioctl() failed: %s\n", strerror(errno));
+		close(fd);
+		exit(EXIT_FAILURE);
+	}
+
+	if (command_settings(speed, mode, type, fd) < 0){
+		close(fd);
+        	exit(EXIT_FAILURE);
+	}
+
+	/* set hlcan like discipline on given tty */
+	if (ioctl(fd, TIOCSETD, &ldisc) < 0) {
+		perror("ioctl TIOCSETD");
+		exit(EXIT_FAILURE);
+	}
+	
+	/* retrieve the name of the created CAN netdevice */
+	if (ioctl(fd, SIOCGIFNAME, ifr.ifr_name) < 0) {
+		perror("ioctl SIOCGIFNAME");
+		exit(EXIT_FAILURE);
+	}
+
+	/* Change the mode according to the given command line paramter */
+	if (ioctl(fd, IO_CTL_MODE, mode) < 0) {
+		perror("ioctl mode");
+		exit(EXIT_FAILURE);
+	}
+#endif
+}
+
 // /home/me/dev/linux/drivers/net/can/usb/esd_usb2.c
 static int ch341_can_net_open(struct net_device *netdev)
 {
-	return -1;
+	struct ch341_can_struct *priv = netdev_priv(netdev);
+	int err;
+
+	/* common open */
+	err = open_candev(netdev);
+	if (err != 0)
+		return err;
+
+	/* finally start device */
+	err = ch341_can_net_open_uart(priv);
+	if (err) {
+		netdev_warn(netdev, "couldn't start device: %d\n", err);
+		close_candev(netdev);
+		return err;
+	}
+
+	netif_start_queue(netdev);
+
+	return 0;
 }
 
 static netdev_tx_t ch341_can_net_start_xmit(struct sk_buff *skb,
@@ -830,8 +926,12 @@ static netdev_tx_t ch341_can_net_start_xmit(struct sk_buff *skb,
 
 static int ch341_can_net_close(struct net_device *netdev)
 {
-	
-	return -1;
+	struct ch341_can_struct *priv;
+	priv = netdev_priv(netdev);
+	priv->can.state = CAN_STATE_STOPPED;
+	netif_stop_queue(netdev);
+	close_candev(netdev);
+	return 0;
 }
 
 static const struct net_device_ops ch341_can_net_netdev_ops = {
@@ -842,7 +942,7 @@ static const struct net_device_ops ch341_can_net_netdev_ops = {
 };
 
 
-static int ch341_can_net_attach(struct usb_serial_port *port){
+static int ch341_can_net_attach(struct usb_serial_port *port, struct ch341_can_private *serialPriv){
 	struct net_device *netdev;
 	struct ch341_can_struct *priv;
 	struct device *dev = &port->serial->interface->dev;
@@ -856,7 +956,9 @@ static int ch341_can_net_attach(struct usb_serial_port *port){
 	}
 
 	priv = netdev_priv(netdev);
+	priv->netdev = netdev;
 	priv->port = port;
+	serialPriv->can = priv;
 
 	priv->can.state = CAN_STATE_STOPPED;
 	priv->can.ctrlmode_supported = CAN_CTRLMODE_LISTENONLY;
