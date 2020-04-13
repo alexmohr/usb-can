@@ -13,3 +13,5 @@ clean:
 	make -C /lib/modules/$(shell uname -r)/build/ M=$(PWD) clean
 install:
 	cp hlcan.ko /usr/lib/modules/$(shell uname -r)/kernel/drivers/net/can
+remove:
+	rm -rf /usr/lib/modules/$(shell uname -r)/kernel/drivers/net/can/hlcan.ko
