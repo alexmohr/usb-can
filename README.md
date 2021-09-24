@@ -26,6 +26,12 @@ To build the module and the userspace tools run ``make`` in ``src`` and ``src/mo
 ./build.sh
 ````
 
+If you need to sign the module, on Ubuntu machines you can run something like
+
+````
+kmodsign sha512 /var/lib/shim-signed/mok/MOK.priv /var/lib/shim-signed/mok/MOK.der src/module/hlcan.ko
+````
+
 To install run ``make install`` in the folders listed above or 
 
 ````
