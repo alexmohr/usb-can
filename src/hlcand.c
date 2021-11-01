@@ -85,9 +85,10 @@ void print_usage(char *prg)
 	fprintf(stderr, "         -e         (set interface to extended id mode)\n");
 	fprintf(stderr, "         -F         (stay in foreground; no daemonize)\n");
 	fprintf(stderr, "         -m <mode>  (0: normal (default), 1: loopback, 2:silent, 3: loopback silent)\n");
-	fprintf(stderr, "         -h         (show this help page)\n");
+	fprintf(stderr, "         -h         (show this help page)\n\n");
+	fprintf(stderr, "[canif-name] defines the can device name (by default can0)\n");
 	fprintf(stderr, "\nExamples:\n");
-	fprintf(stderr, "hlcand -m 2 -s 500000 /dev/ttyUSB0\n");
+	fprintf(stderr, "hlcand -m 2 -s 500000 /dev/ttyUSB0\n can0");
 	fprintf(stderr, "\n");
 	exit(EXIT_FAILURE);
 }
