@@ -1,0 +1,1 @@
+cmd_/home/me/dev/usb-can/src/module/Module.symvers := sed 's/\.ko$$/\.o/' /home/me/dev/usb-can/src/module/modules.order | scripts/mod/modpost  -a  -o /home/me/dev/usb-can/src/module/Module.symvers -e -i Module.symvers  -N -T -
