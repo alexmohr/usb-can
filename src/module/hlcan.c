@@ -502,7 +502,7 @@ static const struct net_device_ops slc_netdev_ops = {
  * in parallel
  */
 static void slcan_receive_buf(struct tty_struct *tty,
-			      const unsigned char *cp, char *fp, int count)
+			      const unsigned char *cp, const char *fp, int count)
 {
 	struct slcan *sl = (struct slcan *) tty->disc_data;
 
@@ -773,7 +773,6 @@ static int slcan_ioctl(struct tty_struct *tty, struct file *file,
 
 static struct tty_ldisc_ops slc_ldisc = {
 	.owner		= THIS_MODULE,
-	.magic		= TTY_LDISC_MAGIC,
 	.name		= "hlcan",
 	.open		= slcan_open,
 	.close		= slcan_close,
@@ -798,7 +797,7 @@ static int __init slcan_init(void)
 		return -ENOMEM;
 
 	/* Fill in our line protocol discipline, and register it */
-	status = tty_register_ldisc(N_HLCAN, &slc_ldisc);
+	status = tty_register_ldisc(&slc_ldisc);
 	if (status)  {
 		printk(KERN_ERR "hlcan: can't register line discipline\n");
 		kfree(slcan_devs);
@@ -864,9 +863,8 @@ static void __exit slcan_exit(void)
 	kfree(slcan_devs);
 	slcan_devs = NULL;
 
-	i = tty_unregister_ldisc(N_HLCAN);
-	if (i)
-		printk(KERN_ERR "hlcan: can't unregister ldisc (err %d)\n", i);
+	tty_unregister_ldisc(&slc_ldisc);
+
 }
 
 module_init(slcan_init);
