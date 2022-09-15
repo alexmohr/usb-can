@@ -23,6 +23,7 @@ And the whole thing is actually a USB to serial converter, for which Linux will 
 The current master supports only kernel version to 5.12
 Branches for the following newer kernel exist. 
 * [5.13](https://github.com/alexmohr/usb-can/tree/kernel-5.13)
+* [5.15](https://github.com/alexmohr/usb-can/tree/kernel-5.15)
 
 ## Building & Installation
 To build the module and the userspace tools run ``make`` in ``src`` and ``src/modules`` or run
