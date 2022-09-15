@@ -332,7 +332,7 @@ static void slc_encaps(struct slcan *sl, struct can_frame *cf)
 	/* mask the upper 3 bits because they are used for flags */
 	id = cf->can_id & 0x1FFFFFFF;
 	if (cf->can_id & CAN_EFF_FLAG) {
-		*pos++ &= HLCAN_FLAG_ID_EXT;
+		*pos++ |= HLCAN_FLAG_ID_EXT;
 		*pos++ = (unsigned char) (id & 0xFF);
 		*pos++ = (unsigned char) ((id >> 8) & 0xFF);
 		*pos++ = (unsigned char) ((id >> 16) & 0xFF);
