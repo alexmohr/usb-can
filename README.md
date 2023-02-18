@@ -17,12 +17,9 @@ And the whole thing is actually a USB to serial converter, for which Linux will 
 
 ## Requirements
 * can-utils
+* kernel-headers (i.e. sudo apt install linux-headers-$(uname -r))
 
 **Please note that this module cannot be used together with slcan, make sure the module is not loaded and won't be loaded automatically!**
-
-The current master supports only kernel version to 5.12
-Branches for the following newer kernel exist. 
-* [5.13](https://github.com/alexmohr/usb-can/tree/kernel-5.13)
 
 ## Building & Installation
 To build the module and the userspace tools run ``make`` in ``src`` and ``src/modules`` or run

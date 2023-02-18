@@ -10,6 +10,7 @@ hlcand
 *.mod*
 *.o
 *.ko
+*.cmd*
 Module.symvers
 modules.order
 src/module/update.sh

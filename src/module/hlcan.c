@@ -59,7 +59,7 @@
 #include <linux/can.h>
 #include <linux/can/dev.h>
 #include <linux/can/skb.h>
-
+#include <linux/version.h>
 #include "hlcan.h"
 
 MODULE_ALIAS_LDISC(N_HLCAN);
@@ -183,10 +183,12 @@ static void slc_bump(struct slcan *sl)
 	unsigned char data_start = 3;
 	/* idx 0 = packet header, skip it */
 	unsigned char *cmd = sl->rbuff + 1;
-	
-	cf.len = GET_DLC(*cmd);
-	cf.can_id = GET_FRAME_ID(sl->rbuff);
-	
+
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 13, 0)
+        cf.can_id = GET_FRAME_ID(sl->rbuff);
+#else
+        cf.len = GET_DLC(*cmd);
+#endif
 	if (IS_REMOTE(*cmd)){
 		cf.can_id |= CAN_RTR_FLAG;
 	}
@@ -199,9 +201,15 @@ static void slc_bump(struct slcan *sl)
 	*(u64 *) (&cf.data) = 0; /* clear payload */
 	/* RTR frames may have a dlc > 0 but they never have any data bytes */
 	if (!(cf.can_id & CAN_RTR_FLAG)) {
-		memcpy(cf.data, 
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 13, 0)
+          memcpy(cf.data,
 			cmd + data_start,
-			cf.len);
+			cf.can_dlc);
+#else
+          memcpy(cf.data,
+                 cmd + data_start,
+                 cf.len);
+#endif
 	}
 
 	skb = dev_alloc_skb(sizeof(struct can_frame) +
@@ -221,7 +229,11 @@ static void slc_bump(struct slcan *sl)
 	skb_put_data(skb, &cf, sizeof(struct can_frame));
 
 	sl->dev->stats.rx_packets++;
-	sl->dev->stats.rx_bytes += cf.len;
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 13, 0)
+	sl->dev->stats.rx_bytes += cf.can_dlc;
+#else
+        sl->dev->stats.rx_bytes += cf.len;
+#endif
 	netif_rx(skb);
 }
 
@@ -323,7 +335,11 @@ static void slc_encaps(struct slcan *sl, struct can_frame *cf)
 	*pos++ = HLCAN_PACKET_START;
 	
 	*pos = HLCAN_FRAME_PREFIX;
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 13, 0)
+        *pos |= cf->can_dlc;
+#else
 	*pos |= cf->len;
+#endif
 	if (cf->can_id & CAN_RTR_FLAG) {
 		*pos |= HLCAN_FLAG_RTR;
 	}
@@ -345,7 +361,11 @@ static void slc_encaps(struct slcan *sl, struct can_frame *cf)
 
 	/* RTR frames may have a dlc > 0 but they never have any data bytes */
 	if (!(cf->can_id & CAN_RTR_FLAG)) {
-		for (i = 0; i < cf->len; i++)
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 13, 0)
+		for (i = 0; i < cf->can_dlc; i++)
+#else
+                for (i = 0; i < cf->len; i++)
+#endif
 			*pos++ = cf->data[i];
 	}
 
@@ -363,7 +383,11 @@ static void slc_encaps(struct slcan *sl, struct can_frame *cf)
 	actual = sl->tty->ops->write(sl->tty, sl->xbuff, pos - sl->xbuff);
 	sl->xleft = (pos - sl->xbuff) - actual;
 	sl->xhead = sl->xbuff + actual;
-	sl->dev->stats.tx_bytes += cf->len;
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 13, 0)
+	sl->dev->stats.tx_bytes += cf->can_dlc;
+#else
+        sl->dev->stats.tx_bytes += cf->len;
+#endif
 }
 
 /* Write out any remaining transmit buffer. Scheduled when tty is writable */
@@ -501,8 +525,13 @@ static const struct net_device_ops slc_netdev_ops = {
  * be re-entered while running but other ldisc functions may be called
  * in parallel
  */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
 static void slcan_receive_buf(struct tty_struct *tty,
-			      const unsigned char *cp, char *fp, int count)
+                              const unsigned char *cp, char *fp, int count)
+#else
+static void slcan_receive_buf(struct tty_struct *tty,
+			      const unsigned char *cp, const char *fp, int count)
+#endif
 {
 	struct slcan *sl = (struct slcan *) tty->disc_data;
 
@@ -773,7 +802,11 @@ static int slcan_ioctl(struct tty_struct *tty, struct file *file,
 
 static struct tty_ldisc_ops slc_ldisc = {
 	.owner		= THIS_MODULE,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 13, 0)
 	.magic		= TTY_LDISC_MAGIC,
+#else
+        .num = N_HLCAN,
+#endif
 	.name		= "hlcan",
 	.open		= slcan_open,
 	.close		= slcan_close,
@@ -798,7 +831,12 @@ static int __init slcan_init(void)
 		return -ENOMEM;
 
 	/* Fill in our line protocol discipline, and register it */
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 14, 0)
 	status = tty_register_ldisc(N_HLCAN, &slc_ldisc);
+#else
+        status = tty_register_ldisc(&slc_ldisc);
+#endif
+
 	if (status)  {
 		printk(KERN_ERR "hlcan: can't register line discipline\n");
 		kfree(slcan_devs);
@@ -864,9 +902,13 @@ static void __exit slcan_exit(void)
 	kfree(slcan_devs);
 	slcan_devs = NULL;
 
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 14, 0)
 	i = tty_unregister_ldisc(N_HLCAN);
 	if (i)
 		printk(KERN_ERR "hlcan: can't unregister ldisc (err %d)\n", i);
+#else
+        tty_unregister_ldisc(&slc_ldisc);
+#endif
 }
 
 module_init(slcan_init);
