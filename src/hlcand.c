@@ -85,9 +85,10 @@ void print_usage(char *prg)
 	fprintf(stderr, "         -e         (set interface to extended id mode)\n");
 	fprintf(stderr, "         -F         (stay in foreground; no daemonize)\n");
 	fprintf(stderr, "         -m <mode>  (0: normal (default), 1: loopback, 2:silent, 3: loopback silent)\n");
-	fprintf(stderr, "         -h         (show this help page)\n");
+	fprintf(stderr, "         -h         (show this help page)\n\n");
+	fprintf(stderr, "[canif-name] defines the can device name (by default can0)\n");
 	fprintf(stderr, "\nExamples:\n");
-	fprintf(stderr, "hlcand -m 2 -s 500000 /dev/ttyUSB0\n");
+	fprintf(stderr, "hlcand -m 2 -s 500000 /dev/ttyUSB0\n can0");
 	fprintf(stderr, "\n");
 	exit(EXIT_FAILURE);
 }
@@ -209,6 +210,7 @@ int main(int argc, char *argv[])
 	static struct ifreq ifr;
 	struct termios2 tios;
 	char *tty = NULL;
+	char *name = NULL;
 	char *pch;
 	int fd, opt;
 
@@ -272,6 +274,10 @@ int main(int argc, char *argv[])
 	if (NULL == tty)
 		print_usage(argv[0]);
 
+	name = argv[optind + 1];
+	if (name && (strlen(name) > sizeof(ifr.ifr_newname) - 1))
+		print_usage(argv[0]);
+
 	/* Prepare the tty device name string */
 	pch = strstr(tty, devprefix);
 	if (pch != tty)
@@ -326,7 +332,36 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 	
+	/* retrieve the name of the created CAN netdevice */
+	if (ioctl(fd, SIOCGIFNAME, ifr.ifr_name) < 0) {
+		perror("ioctl SIOCGIFNAME");
+		exit(EXIT_FAILURE);
+	}
+
+	
 	syslogger(LOG_NOTICE, "attached TTY %s to netdevice %s\n", ttypath, ifr.ifr_name);
+
+	/* try to rename the created netdevice */
+	if (name) {
+		int s = socket(PF_INET, SOCK_DGRAM, 0);
+
+		if (s < 0)
+			perror("socket for interface rename");
+		else {
+			/* current slcan%d name is still in ifr.ifr_name */
+			memset (ifr.ifr_newname, 0, sizeof(ifr.ifr_newname));
+			strncpy (ifr.ifr_newname, name, sizeof(ifr.ifr_newname) - 1);
+
+			if (ioctl(s, SIOCSIFNAME, &ifr) < 0) {
+				syslogger(LOG_NOTICE, "netdevice rename to %s failed\n", name);
+				perror("ioctl SIOCSIFNAME rename");
+				exit(EXIT_FAILURE);
+			} else
+				syslogger(LOG_NOTICE, "netdevice renamed to %s\n", name);
+
+			close(s);
+		}	
+	}
 	
 	/* Daemonize */
 	if (run_as_daemon) {
