@@ -88,3 +88,12 @@ Options: -l         (set transciever to listen mode)
 Examples:
 hlcand -m 2 -s 500000 /dev/ttyUSB0
 ````
+
+
+
+## kernel module configuration
+
+
+insmod hl340_can.ko num_devices=3 device_names="/dev/ttyUSB0,/dev/ttyUSB1,/dev/ttyUSB2" uart_baudrates="9600,115200,57600"
+
+        /sys/module/hlcan/parameters
