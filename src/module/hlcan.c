@@ -764,15 +764,27 @@ static void slcan_close(struct tty_struct *tty)
 	/* This will complete via sl_free_netdev */
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 16, 0)
+static void slcan_hangup(struct tty_struct *tty)
+{
+	slcan_close(tty);
+	return;
+}
+#else
 static int slcan_hangup(struct tty_struct *tty)
 {
 	slcan_close(tty);
 	return 0;
 }
+#endif
 
 /* Perform I/O control on an active SLCAN channel. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 17, 0)
+static int slcan_ioctl(struct tty_struct *tty, unsigned int cmd, unsigned long arg)
+#else
 static int slcan_ioctl(struct tty_struct *tty, struct file *file,
 		       unsigned int cmd, unsigned long arg)
+#endif
 {
 	struct slcan *sl = (struct slcan *) tty->disc_data;
 
@@ -794,7 +806,11 @@ static int slcan_ioctl(struct tty_struct *tty, struct file *file,
 		return 0;
 
 	default:
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 16, 0)
+		return tty_mode_ioctl(tty, cmd, arg);
+#else
 		return tty_mode_ioctl(tty, file, cmd, arg);
+#endif
 	}
 }
 
