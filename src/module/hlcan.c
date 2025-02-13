@@ -187,8 +187,9 @@ static void slc_bump(struct slcan *sl)
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 13, 0)
         cf.can_id = GET_FRAME_ID(sl->rbuff);
 #else
-        cf.len = GET_DLC(*cmd);
+	cf.len = GET_DLC(*cmd);
 #endif
+
 	if (IS_REMOTE(*cmd)){
 		cf.can_id |= CAN_RTR_FLAG;
 	}
@@ -202,13 +203,13 @@ static void slc_bump(struct slcan *sl)
 	/* RTR frames may have a dlc > 0 but they never have any data bytes */
 	if (!(cf.can_id & CAN_RTR_FLAG)) {
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 13, 0)
-          memcpy(cf.data,
+		memcpy(cf.data,
 			cmd + data_start,
 			cf.can_dlc);
 #else
-          memcpy(cf.data,
-                 cmd + data_start,
-                 cf.len);
+		memcpy(cf.data,
+			cmd + data_start,
+			cf.len);
 #endif
 	}
 
@@ -232,7 +233,7 @@ static void slc_bump(struct slcan *sl)
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 13, 0)
 	sl->dev->stats.rx_bytes += cf.can_dlc;
 #else
-        sl->dev->stats.rx_bytes += cf.len;
+	sl->dev->stats.rx_bytes += cf.len;
 #endif
 	netif_rx(skb);
 }
