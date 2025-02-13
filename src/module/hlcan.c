@@ -184,8 +184,9 @@ static void slc_bump(struct slcan *sl)
 	/* idx 0 = packet header, skip it */
 	unsigned char *cmd = sl->rbuff + 1;
 
+	cf.can_id = GET_FRAME_ID(sl->rbuff);
+
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 13, 0)
-        cf.can_id = GET_FRAME_ID(sl->rbuff);
         cf.can_dlc = GET_DLC(*cmd);
 #else
 	cf.len = GET_DLC(*cmd);
