@@ -292,7 +292,7 @@ static void slcan_unesc(struct slcan *sl, unsigned char s)
 		return;
 	}
 
-	if (sl->rcount > SLC_MTU) {
+	if (sl->rcount >= SLC_MTU) {
 		sl->dev->stats.rx_over_errors++;
 		set_bit(SLF_ERROR, &sl->flags);
 		return;
