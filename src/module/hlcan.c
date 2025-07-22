@@ -1,5 +1,5 @@
 /*
- * hl340.c - CAN driver interface for 
+ * hl340.c - CAN driver interface for
  *
  * This file is derived from linux/drivers/net/can/slcan.c
  *
@@ -123,7 +123,7 @@ static struct net_device **slcan_devs;
 
 #define IS_EXT_ID(type)(CHECK_BIT(type, 5))
 #define IS_REMOTE(type)(CHECK_BIT(type, 4))
-		
+
 /* checks if bit 7 and 6 is set */
 #define IS_DATA_PACKAGE(type) ({ \
 		((type >> 6) ^ 3) == 0;})
@@ -162,7 +162,7 @@ static struct net_device **slcan_devs;
  *  0 = 11 bit frame
  *  1 = 29 bit frame
  * bit 4:
- *  0 = data frame 
+ *  0 = data frame
  *  1 = remote frame
  * bit 0-3: dlc
  *
@@ -267,13 +267,13 @@ static void hlcan_update_rstate(struct slcan *sl)
 		/* Data frame... */
 		int ext_id = IS_EXT_ID(sl->rbuff[1]) ? 4 : 2;
 		int dlc = GET_DLC(sl->rbuff[1]);
-		
+
 		sl->rexpected =	1 + // HLCAN_PACKET_START
 			1 + // type byte
 			ext_id +
-			dlc + 
+			dlc +
 			1; // HLCAN_PACKET_END
-		
+
 		if (sl->rcount >= sl->rexpected){
 			sl->rstate = COMPLETE;
 		} else {
@@ -306,7 +306,7 @@ static void slcan_unesc(struct slcan *sl, unsigned char s)
 		&& sl->rcount < sl->rexpected) {
 		return;
 	}
-	
+
 	hlcan_update_rstate(sl);
 	switch(sl->rstate) {
 		case COMPLETE:
@@ -336,7 +336,7 @@ static void slc_encaps(struct slcan *sl, struct can_frame *cf)
 
 	pos = sl->xbuff;
 	*pos++ = HLCAN_PACKET_START;
-	
+
 	*pos = HLCAN_FRAME_PREFIX;
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 13, 0)
         *pos |= cf->can_dlc;
@@ -530,10 +530,13 @@ static const struct net_device_ops slc_netdev_ops = {
  */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
 static void slcan_receive_buf(struct tty_struct *tty,
-                              const unsigned char *cp, char *fp, int count)
+					const unsigned char *cp, char *fp, int count)
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+static void slcan_receive_buf(struct tty_struct *tty,
+			      	const unsigned char *cp, const char *fp, int count)
 #else
 static void slcan_receive_buf(struct tty_struct *tty,
-			      const unsigned char *cp, const char *fp, int count)
+					const u8 *cp, const u8 *fp, size_t count)
 #endif
 {
 	struct slcan *sl = (struct slcan *) tty->disc_data;
@@ -618,19 +621,19 @@ static struct slcan *slc_alloc(void)
 		return NULL;
 
 	sl = netdev_priv(dev);
-	
+
 	dev->netdev_ops = &slc_netdev_ops;
 	// Device does NOT echo on itself
 	// dev->flags |= IFF_ECHO;
 
 	/* this does not actually matter when we use the serial port */
 	/* todo set this to a propper value */
-	sl->can.clock.freq = 3686400000; 
+	sl->can.clock.freq = 3686400000;
 	sl->can.data_bittiming_const = &hlcan_bittiming_const;
 	sl->can.bittiming.bitrate = 800000;
 	sl->can.do_set_mode = hlcan_do_set_mode;
 	sl->can.ctrlmode_supported = CAN_CTRLMODE_LOOPBACK |
-		CAN_CTRLMODE_3_SAMPLES | 
+		CAN_CTRLMODE_3_SAMPLES |
 		CAN_CTRLMODE_FD |
 		CAN_CTRLMODE_LISTENONLY;
 
@@ -692,7 +695,7 @@ static int slcan_open(struct tty_struct *tty)
 	/* OK.  Find a free SLCAN channel to use. */
 	err = -ENFILE;
 	sl = slc_alloc();
-	
+
 	SET_NETDEV_DEV(sl->dev, tty->dev);
 	if (sl == NULL) {
 		err = -ENOMEM;
@@ -805,7 +808,7 @@ static int slcan_ioctl(struct tty_struct *tty, struct file *file,
 		if (sl->mode == 1 || sl->mode == 3){
 			sl->dev->flags |= IFF_ECHO;
 		}
-			
+
 		return 0;
 
 	default:
