@@ -243,12 +243,10 @@ static void slc_bump(struct slcan *sl)
 /* get the state of the current receive transmission */
 static void hlcan_update_rstate(struct slcan *sl)
 {
-	if (sl->rcount > 0) {
-		if (sl->rbuff[0] != HLCAN_PACKET_START) {
-			/* Need to sync on 0xaa at start of frames, so just skip. */
-			sl->rstate = MISSED_HEADER;
-			 return;
-		}
+	if (sl->rbuff[0] != HLCAN_PACKET_START) {
+		/* Need to sync on 0xaa at start of frames, so just skip. */
+		sl->rstate = MISSED_HEADER;
+		return;
 	}
 
 	if (sl->rcount < 2) {
@@ -256,32 +254,27 @@ static void hlcan_update_rstate(struct slcan *sl)
 		return;
 	}
 
-	if (sl->rbuff[1] == HLCAN_CFG_PACKAGE_TYPE) {
-		if (sl->rcount >= HLCAN_CFG_PACKAGE_LEN) {
-			/* will be handled by userspace tool */
-			sl->rstate = COMPLETE;
-		} else {
-			sl->rstate = RECEIVING;
-		}
-	} else if (IS_DATA_PACKAGE(sl->rbuff[1])) {
-		/* Data frame... */
-		int ext_id = IS_EXT_ID(sl->rbuff[1]) ? 4 : 2;
-		int dlc = GET_DLC(sl->rbuff[1]);
+	if (!IS_DATA_PACKAGE(sl->rbuff[1])) {
+		sl->rstate = FRAME_ERROR;
+		return;
+	}
 
-		sl->rexpected =	1 + // HLCAN_PACKET_START
-			1 + // type byte
-			ext_id +
-			dlc +
-			1; // HLCAN_PACKET_END
+	/* Data frame... */
+	int ext_id = IS_EXT_ID(sl->rbuff[1]) ? 4 : 2;
+	int dlc = GET_DLC(sl->rbuff[1]);
 
-		if (sl->rcount >= sl->rexpected){
-			sl->rstate = COMPLETE;
-		} else {
-			sl->rstate = RECEIVING;
-		}
+	sl->rexpected =	1 + // HLCAN_PACKET_START
+		1 + // type byte
+		ext_id +
+		dlc +
+		1; // HLCAN_PACKET_END
+
+	if (dlc > HLCAN_MAX_CAN_PAYLOAD) {
+		sl->rstate = FRAME_ERROR;
+	}else if (sl->rcount >= sl->rexpected) {
+		sl->rstate = COMPLETE;
 	} else {
-		/* Unhandled frame type. */
-		sl->rstate = NONE;
+		sl->rstate = RECEIVING;
 	}
 }
 
@@ -313,9 +306,11 @@ static void slcan_unesc(struct slcan *sl, unsigned char s)
 			if (IS_DATA_PACKAGE(sl->rbuff[1])) {
 				slc_bump(sl);
 			}
-			sl->rexpected = 0;
+			fallthrough;
+		case FRAME_ERROR:
 			fallthrough;
 		case MISSED_HEADER:
+			sl->rexpected = 0;
 			sl->rcount = 0;
 			break;
 		default: break;
