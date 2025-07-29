@@ -9,6 +9,7 @@
 
 #define HLCAN_PACKET_START 		0xAA
 #define HLCAN_PACKET_END		0x55
+#define HLCAN_MAX_CAN_PAYLOAD   0x08 // 8 bytes
 
 #define HLCAN_CFG_PACKAGE_TYPE	0x55
 #define HLCAN_CFG_PACKAGE_LEN	0x14
@@ -20,7 +21,8 @@ typedef enum {
 	NONE,
 	RECEIVING,
 	COMPLETE,
-	MISSED_HEADER
+	MISSED_HEADER,
+    FRAME_ERROR
 } FRAME_STATE;
 
 typedef enum {
