@@ -271,7 +271,7 @@ static void hlcan_update_rstate(struct slcan *sl)
 
 	if (dlc > HLCAN_MAX_CAN_PAYLOAD) {
 		sl->rstate = FRAME_ERROR;
-	}else if (sl->rcount >= sl->rexpected) {
+	} else if (sl->rcount >= sl->rexpected) {
 		sl->rstate = COMPLETE;
 	} else {
 		sl->rstate = RECEIVING;
