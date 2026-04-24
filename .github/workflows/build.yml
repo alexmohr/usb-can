@@ -1,0 +1,31 @@
+name: build
+
+on:
+  push:
+    branches: [master, driver]
+  pull_request:
+
+jobs:
+  build:
+    name: Build kernel module
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain and kernel headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential linux-headers-$(uname -r)
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Inspect module
+        run: modinfo src/ch341_can.ko
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ch341_can.ko
+          path: src/ch341_can.ko

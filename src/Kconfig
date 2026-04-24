@@ -1,0 +1,16 @@
+config CAN_CH341
+	tristate "CH341-based USB-CAN adapter"
+	depends on USB && CAN_DEV
+	help
+	  This driver adds SocketCAN support for cheap USB-CAN analyzers
+	  that use a QinHeng CH341 (HL-340) USB-to-serial bridge chip
+	  with a CAN transceiver.
+
+	  These adapters identify as:
+	    Bus xxx Device yyy: ID 1a86:7523 QinHeng Electronics HL-340
+
+	  The driver talks directly to the USB device — no userspace daemon
+	  or TTY line discipline is required.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called ch341_can.

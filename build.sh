@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
-pushd `dirname $0` > /dev/null
+set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-echo Building module
-cd src/module 
-make $1
-
-echo Building userpace tools
-cd ../
-make $1
-
-popd > /dev/null
+echo "Building ch341_can kernel module..."
+make -C "$SCRIPT_DIR/src" "$@"

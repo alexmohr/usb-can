@@ -1,90 +1,141 @@
-[![Build Status](https://travis-ci.org/alexmohr/usb-can.svg?branch=master)](https://travis-ci.com/alexmohr/usb-can)
-# USB-CAN Analyzer Linux Support
-This repository implements a kernel module which adds support for QinHeng Electronics HL-340 USB-Serial adapter
-It is based on the works https://github.com/kobolt/usb-can and the linux slcan driver.
+# CH341 USB-CAN Linux Kernel Module
 
-Adapters like the one below are supported
+Native SocketCAN driver for cheap USB-CAN analyzers based on the QinHeng CH341 (HL-340) USB-to-serial bridge.
 
 ![alt text](USB-CAN.jpg)
 
-The adapters can be found everywhere on Ebay nowadays, but there is no official Linux support. Only a Windows binary file [stored directly on GitHub](https://github.com/SeeedDocument/USB-CAN_Analyzer).
-
-When plugged in, it will show something like this:
+These adapters are widely available on eBay/AliExpress and show up as:
 ```
 Bus 002 Device 006: ID 1a86:7523 QinHeng Electronics HL-340 USB-Serial adapter
 ```
-And the whole thing is actually a USB to serial converter, for which Linux will provide the 'ch341-uart' driver and create a new /dev/ttyUSB device. So this program simply implements part of that serial protocol.
+
+## Architecture
+
+This module talks **directly** to the USB device — no userspace daemon, no
+TTY line discipline, and no dependency on the `ch341-uart` or `slcan` kernel
+modules. It registers a standard SocketCAN network interface that works with
+`ip link`, `candump`, `cansend`, and all other SocketCAN tools.
 
 ## Requirements
-* can-utils
-* kernel-headers (i.e. sudo apt install linux-headers-$(uname -r))
 
-**Please note that this module cannot be used together with slcan, make sure the module is not loaded and won't be loaded automatically!**
+- Linux kernel headers (>= 6.0 recommended)
+- `can-utils` (optional, for `candump`/`cansend`)
 
-## Building & Installation
-To build the module and the userspace tools run ``make`` in ``src`` and ``src/modules`` or run
-````
-./build.sh
-````
+```bash
+# Debian/Ubuntu
+sudo apt install linux-headers-$(uname -r) can-utils
+```
 
-If you need to sign the module, on Ubuntu machines you can run something like
+## Building
 
-````
-kmodsign sha512 /var/lib/shim-signed/mok/MOK.priv /var/lib/shim-signed/mok/MOK.der src/module/hlcan.ko
-````
+```bash
+cd src
+make
+```
 
-To install run ``make install`` in the folders listed above or 
+### Module signing (Secure Boot)
 
-````
-./build.sh install
-````
+```bash
+kmodsign sha512 /var/lib/shim-signed/mok/MOK.priv \
+                 /var/lib/shim-signed/mok/MOK.der \
+                 src/ch341_can.ko
+```
 
-or to remove 
-````
-./build.sh remove
-````
+## Installation
 
+```bash
+cd src
+sudo make install     # installs + depmod
+```
+
+To remove:
+```bash
+cd src
+sudo make uninstall
+```
 
 ## Usage
-Load the kernel module 
-````
-modprobe can-dev
-insmod hlcan.ko
-````
 
-Start hlcand
-Listen only 
-````
-hlcand -m 2 -s 500000 /dev/ttyUSB0
-````
+**Important:** Unbind the `ch341` serial driver first if it has already
+claimed the device:
 
-Foreground
-````
-hlcand -F -s 500000 /dev/ttyUSB0
-````
+```bash
+# Check if ch341 grabbed the device
+lsusb -t | grep ch341
 
-Extended Frames
-````
-hlcand -e -s 500000 /dev/ttyUSB0
-````
+# If so, either blacklist it or unbind:
+echo '1a86 7523' | sudo tee /sys/bus/usb/drivers/ch341/unbind
+# — or add to /etc/modprobe.d/blacklist.conf:
+#   blacklist ch341
+```
 
-Enable the interface
-````
-ip link set can0 up
-````
+### Load the module
 
-Help 
-````
-Usage: ./hlcand [options] <tty> [canif-name]
+```bash
+sudo modprobe can-dev          # CAN subsystem dependency
+sudo insmod src/ch341_can.ko
+# or, after 'make install':
+sudo modprobe ch341_can
+```
 
-Options: -l         (set transciever to listen mode)
-         -s <speed> (set CAN speed in bits per second)
-         -S <speed> (set UART speed in baud)
-         -e         (set interface to extended id mode)
-         -F         (stay in foreground; no daemonize)
-         -m <mode>  (0: normal (default), 1: loopback, 2:silent, 3: loopback silent)
-         -h         (show this help page)
+### Configure and bring up the interface
 
-Examples:
-hlcand -m 2 -s 500000 /dev/ttyUSB0
-````
+```bash
+# Set bitrate (required before link-up)
+sudo ip link set can0 type can bitrate 500000
+
+# Optional: listen-only mode
+sudo ip link set can0 type can listen-only on
+
+# Optional: loopback mode
+sudo ip link set can0 type can loopback on
+
+# Bring the interface up
+sudo ip link set can0 up
+```
+
+### Supported bitrates
+
+| Bitrate   | Code |
+|-----------|------|
+| 1000000   | 0x01 |
+| 800000    | 0x02 |
+| 500000    | 0x03 |
+| 400000    | 0x04 |
+| 250000    | 0x05 |
+| 200000    | 0x06 |
+| 125000    | 0x07 |
+| 100000    | 0x08 |
+| 50000     | 0x09 |
+| 20000     | 0x0a |
+| 10000     | 0x0b |
+| 5000      | 0x0c |
+
+### Send / receive CAN frames
+
+```bash
+# Monitor all traffic
+candump can0
+
+# Send a standard frame
+cansend can0 123#DEADBEEF
+
+# Send an extended frame
+cansend can0 1ABCDEF0#0102030405060708
+```
+
+### Tear down
+
+```bash
+sudo ip link set can0 down
+sudo rmmod ch341_can
+```
+
+## Module parameters
+
+None currently — all configuration is done via standard SocketCAN `ip link`
+commands.
+
+## License
+
+GPL-2.0-only

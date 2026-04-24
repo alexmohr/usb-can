@@ -5,12 +5,9 @@ cmake-*/
 *build*/
 .~lock.*
 
-hlcand
-.hlcan*
 *.mod*
 *.o
 *.ko
 *.cmd*
 Module.symvers
 modules.order
-src/module/update.sh
